@@ -17,7 +17,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("proxypass listening on {}", addr);
 
-    let pac = PacEngine::new(&cfg.proxy.pac, cfg.pac.cache_ttl);
+    let pac = PacEngine::new(&cfg);
     let cfg = std::sync::Arc::new(cfg);
 
     loop {

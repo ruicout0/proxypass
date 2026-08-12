@@ -12,7 +12,10 @@ pub struct Config {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxyConfig {
-    pub pac: String,
+    /// PAC URL (mutually exclusive with proxy)
+    pub pac: Option<String>,
+    /// Direct upstream proxy host:port (mutually exclusive with pac)
+    pub proxy: Option<String>,
     pub port: u16,
     pub listen: String,
     pub no_proxy: Vec<String>,
@@ -50,7 +53,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             proxy: ProxyConfig {
-                pac: String::new(),
+                pac: None,
+                proxy: None,
                 port: 3128,
                 listen: "127.0.0.1".to_string(),
                 no_proxy: vec![
@@ -61,7 +65,7 @@ impl Default for Config {
             },
             auth: AuthConfig {
                 username: None,
-                method: AuthMethod::Auto,
+                method: AuthMethod::Negotiate,
             },
             pac: PacConfig {
                 cache_ttl: 300,
@@ -84,11 +88,6 @@ pub fn config_path() -> PathBuf {
 
 pub fn load() -> Result<Config> {
     let path = config_path();
-    if !path.exists() {
-        let cfg = Config::default();
-        save(&cfg)?;
-        return Ok(cfg);
-    }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config: {}", path.display()))?;
     toml::from_str(&content)
