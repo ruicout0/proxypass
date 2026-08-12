@@ -33,12 +33,14 @@ class Proxypass < Formula
 
   def caveats
     <<~EOS
-      To start proxypass as a background service:
+      Before starting the service, run the setup wizard:
+        proxypass setup
+
+      Then start as a background service:
         brew services start proxypass
 
-      To configure:
-        #{etc}/proxypass.toml
-        (or ~/.config/proxypass/config.toml)
+      To configure manually:
+        ~/.config/proxypass/config.toml
 
       To set proxy credentials in the OS keychain:
         proxypass keychain set --username YOUR_USERNAME

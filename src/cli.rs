@@ -59,9 +59,16 @@ pub async fn run(cli: Cli) -> Result<()> {
 async fn start_or_setup() -> Result<()> {
     let cfg_path = config::config_path();
     if !cfg_path.exists() {
-        println!("No config found. Starting setup...\n");
-        setup()?;
-        println!();
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            println!("No config found. Starting setup...\n");
+            setup()?;
+            println!();
+        } else {
+            eprintln!("No config found at {}", cfg_path.display());
+            eprintln!("Run 'proxypass setup' interactively first.");
+            std::process::exit(1);
+        }
     }
     let cfg = config::load()?;
     setup_logging(&cfg);
