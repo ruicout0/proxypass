@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build macOS universal binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build arm64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/x86_64-apple-darwin/release/proxypass \
+            target/aarch64-apple-darwin/release/proxypass \
+            -output proxypass
+          chmod +x proxypass
+
+      - name: Package tarball
+        run: |
+          tar -czf proxypass-${{ github.ref_name }}-macos.tar.gz proxypass
+          shasum -a 256 proxypass-${{ github.ref_name }}-macos.tar.gz > proxypass-${{ github.ref_name }}-macos.tar.gz.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            proxypass-${{ github.ref_name }}-macos.tar.gz
+            proxypass-${{ github.ref_name }}-macos.tar.gz.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-tap:
+    name: Update Homebrew tap
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: ruicout0/homebrew-proxypass
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Download release assets
+        run: |
+          VERSION=${{ github.ref_name }}
+          curl -sL "https://github.com/ruicout0/proxypass/releases/download/${VERSION}/proxypass-${VERSION}-macos.tar.gz.sha256" -o sha256.txt
+          SHA256=$(cat sha256.txt | awk '{print $1}')
+          echo "SHA256=${SHA256}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Update formula
+        run: |
+          sed -i "s|url \".*\"|url \"https://github.com/ruicout0/proxypass/releases/download/${VERSION}/proxypass-${VERSION}-macos.tar.gz\"|" Formula/proxypass.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/proxypass.rb
+          sed -i "s|version \".*\"|version \"${VERSION#v}\"|" Formula/proxypass.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/proxypass.rb
+          git commit -m "proxypass ${VERSION}"
+          git push
