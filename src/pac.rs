@@ -81,7 +81,7 @@ impl PacEngine {
 
 async fn fetch_pac(url: &str) -> Result<String> {
     let client = reqwest::Client::builder()
-        .tls_built_in_native_certs(true)
+        .tls_built_in_root_certs(true)
         .timeout(Duration::from_secs(10))
         .build()?;
     let body = client.get(url).send().await?.text().await?;

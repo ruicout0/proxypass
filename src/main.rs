@@ -2,7 +2,7 @@ mod auth;
 mod cli;
 mod config;
 mod keychain;
-mod launchd;
+mod service;
 mod pac;
 mod proxy;
 
@@ -10,7 +10,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::Cli;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     cli::run(cli).await

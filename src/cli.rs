@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{config, keychain, launchd, proxy};
+use crate::{config, keychain, service, proxy};
 
 #[derive(Parser)]
 #[command(
@@ -33,9 +33,9 @@ pub enum Commands {
     Config,
     /// Store or update proxy password in OS keychain
     Password,
-    /// Install proxypass as a launchd agent (auto-start on login)
+    /// Install proxypass as a background service (auto-start on login)
     Install,
-    /// Remove proxypass launchd agent
+    /// Remove proxypass background service
     Uninstall,
 }
 
@@ -121,6 +121,21 @@ pub fn setup() -> Result<()> {
         }
         _ => {
             cfg.auth.method = config::AuthMethod::Negotiate;
+            // Negotiate/SPNEGO needs your username so it can look up
+            // your Kerberos ticket from the system credential cache.
+            println!("Negotiate/Kerberos uses your system login ticket (kinit).");
+            println!("You may still need a username for the upstream proxy.");
+            let user = prompt("Username (leave blank if not needed): ", "");
+            if !user.trim().is_empty() {
+                cfg.auth.username = Some(user.trim().to_string());
+                // Optionally also store a password for fallback to Basic
+                let save_pwd = prompt("Also store a password for Basic fallback? [y/N]: ", "n");
+                if save_pwd.trim().eq_ignore_ascii_case("y") {
+                    let password = rpassword::prompt_password("Password: ")?;
+                    keychain::set_password(user.trim(), &password)?;
+                    println!("✓ Password stored in macOS Keychain");
+                }
+            }
         }
     }
 
@@ -153,17 +168,17 @@ pub fn setup() -> Result<()> {
 // ── Other commands ────────────────────────────────────────────────────────────
 
 pub fn stop() -> Result<()> {
-    launchd::stop_service()
+    service::stop_service()
 }
 
 pub async fn restart() -> Result<()> {
-    launchd::stop_service().ok();
+    service::stop_service().ok();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    launchd::start_service()
+    service::start_service()
 }
 
 pub fn status() -> Result<()> {
-    launchd::service_status()
+    service::service_status()
 }
 
 pub async fn test(url: &str) -> Result<()> {
@@ -175,6 +190,7 @@ pub async fn test(url: &str) -> Result<()> {
 
     let client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(&proxy_addr)?)
+        .http1_only()  // proxy doesn't serve HTTP/2 itself
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
@@ -225,11 +241,11 @@ pub fn install() -> Result<()> {
     let binary = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "proxypass".to_string());
-    launchd::install(&binary)
+    service::install(&binary)
 }
 
 pub fn uninstall() -> Result<()> {
-    launchd::uninstall()
+    service::uninstall()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

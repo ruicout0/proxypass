@@ -19,10 +19,3 @@ pub fn get_password(username: &str) -> Result<String> {
         .with_context(|| format!("No password found in keychain for user '{}'", username))
 }
 
-pub fn delete_password(username: &str) -> Result<()> {
-    let entry = Entry::new(SERVICE, username)
-        .context("Failed to access keychain")?;
-    entry.delete_credential()
-        .context("Failed to delete password from keychain")?;
-    Ok(())
-}

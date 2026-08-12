@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "A lightweight PAC-aware HTTP proxy with OS keychain auth and simple CLI"
 license = "MIT"
-repository = "https://github.com/rui/proxypass"
+repository = "https://github.com/ruicout0/proxypass"
 
 [[bin]]
 name = "proxypass"
@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 
 # HTTP proxy engine
 hyper = { version = "1", features = ["http1", "server"] }
@@ -20,16 +20,13 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
 # TLS
-rustls = "0.23"
-tokio-rustls = "0.26"
 rustls-native-certs = "0.7"
-webpki-roots = "0.26"
 
 # PAC evaluation (QuickJS)
-rquickjs = { version = "0.6", features = ["full"] }
+rquickjs = { version = "0.6", default-features = false, features = ["classes", "properties", "array-buffer"] }
 
-# Auth
-libgssapi = { version = "0.7", features = ["krb5_bindgen"] }
+# Auth (Kerberos/Negotiate)
+libgssapi = { version = "0.11" }
 
 # Config
 toml = "0.8"
@@ -46,15 +43,15 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
-chrono = "0.4"
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
-tokio-io-timeout = "1"
+reqwest = { version = "0.12", features = ["rustls-tls", "native-tls-alpn", "http2"], default-features = false }
 bytes = "1"
+rpassword = "7"
+libc = "0.2"
+base64 = "0.22"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
-rpassword = "7"
-libc = "0.2"
+panic = "abort"

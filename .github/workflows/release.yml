@@ -1,0 +1,161 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    name: Build macOS universal binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build arm64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/x86_64-apple-darwin/release/proxypass \
+            target/aarch64-apple-darwin/release/proxypass \
+            -output proxypass
+          chmod +x proxypass
+
+      - name: Package tarball
+        run: |
+          tar -czf proxypass-${{ github.ref_name }}-macos.tar.gz proxypass
+          shasum -a 256 proxypass-${{ github.ref_name }}-macos.tar.gz > proxypass-${{ github.ref_name }}-macos.tar.gz.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            proxypass-${{ github.ref_name }}-macos.tar.gz
+            proxypass-${{ github.ref_name }}-macos.tar.gz.sha256
+
+  build-linux:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/proxypass proxypass
+          chmod +x proxypass
+          tar -czf proxypass-${{ github.ref_name }}-linux-x86_64.tar.gz proxypass
+          shasum -a 256 proxypass-${{ github.ref_name }}-linux-x86_64.tar.gz > proxypass-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            proxypass-${{ github.ref_name }}-linux-x86_64.tar.gz
+            proxypass-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
+
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item target/x86_64-pc-windows-msvc/release/proxypass.exe proxypass.exe
+          Compress-Archive -Path proxypass.exe -DestinationPath proxypass-${{ github.ref_name }}-windows-x86_64.zip
+          $hash = (Get-FileHash proxypass-${{ github.ref_name }}-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  proxypass-${{ github.ref_name }}-windows-x86_64.zip" | Out-File -Encoding ASCII proxypass-${{ github.ref_name }}-windows-x86_64.zip.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            proxypass-${{ github.ref_name }}-windows-x86_64.zip
+            proxypass-${{ github.ref_name }}-windows-x86_64.zip.sha256
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos-artifacts/proxypass-*.tar.gz
+            macos-artifacts/proxypass-*.tar.gz.sha256
+            linux-artifacts/proxypass-*.tar.gz
+            linux-artifacts/proxypass-*.tar.gz.sha256
+            windows-artifacts/proxypass-*.zip
+            windows-artifacts/proxypass-*.zip.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-tap:
+    name: Update Homebrew tap
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: ruicout0/homebrew-proxypass
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Download release assets
+        run: |
+          VERSION=${{ github.ref_name }}
+          curl -sL "https://github.com/ruicout0/proxypass/releases/download/${VERSION}/proxypass-${VERSION}-macos.tar.gz.sha256" -o sha256.txt
+          SHA256=$(cat sha256.txt | awk '{print $1}')
+          echo "SHA256=${SHA256}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Update formula
+        run: |
+          sed -i "s|url \".*\"|url \"https://github.com/ruicout0/proxypass/releases/download/${VERSION}/proxypass-${VERSION}-macos.tar.gz\"|" Formula/proxypass.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/proxypass.rb
+          sed -i "s|version \".*\"|version \"${VERSION#v}\"|" Formula/proxypass.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/proxypass.rb
+          git commit -m "proxypass ${VERSION}"
+          git push
