@@ -1,6 +1,6 @@
 [package]
 name = "proxypass"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A lightweight PAC-aware HTTP proxy with OS keychain auth and simple CLI"
 license = "MIT"
