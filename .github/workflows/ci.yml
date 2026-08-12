@@ -135,7 +135,16 @@ jobs:
         run: |
           cd artifacts
           for f in */*.tar.gz */*.zip; do
-            [ -f "$f" ] && gh release upload "${{ github.ref_name }}" "$f" --repo "${{ github.repository }}"
+            [ -f "$f" ] && gh release upload "${{ github.ref_name }}" "$f" --repo "${{ github.repository }}" --clobber
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload sha256 files
+        run: |
+          cd artifacts
+          for f in */*.sha256; do
+            [ -f "$f" ] && gh release upload "${{ github.ref_name }}" "$f" --repo "${{ github.repository }}" --clobber
           done
         env:
           GH_TOKEN: ${{ github.token }}
