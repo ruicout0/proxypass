@@ -27,8 +27,6 @@ mod platform {
     <key>ProgramArguments</key>
     <array>
         <string>{binary}</string>
-        <string>start</string>
-        <string>--foreground</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -184,7 +182,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart={binary} start --foreground
+ExecStart={binary}
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/tmp/proxypass.out
@@ -293,7 +291,7 @@ mod platform {
     pub fn install(_binary_path: &str) -> Result<()> {
         bail!(
             "Automatic service installation is not yet supported on this platform.\n\
-             Run proxypass in the foreground:  proxypass start --foreground\n\
+             Run proxypass in the foreground:  proxypass\n\
              Or use your OS task scheduler / service manager."
         );
     }
@@ -304,11 +302,11 @@ mod platform {
     }
 
     pub fn start_service() -> Result<()> {
-        bail!("Service management not supported on this platform. Run: proxypass start --foreground");
+        bail!("Service management not supported on this platform. Run: proxypass");
     }
 
     pub fn stop_service() -> Result<()> {
-        bail!("Service management not supported on this platform. Run: proxypass start --foreground");
+        bail!("Service management not supported on this platform. Run: proxypass");
     }
 
     pub fn service_status() -> Result<()> {

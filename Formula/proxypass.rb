@@ -24,7 +24,7 @@ class Proxypass < Formula
   end
 
   service do
-    run [opt_bin/"proxypass", "start", "--foreground"]
+    run [opt_bin/"proxypass"]
     run_type :immediate
     keep_alive true
     log_path "/tmp/proxypass.out"

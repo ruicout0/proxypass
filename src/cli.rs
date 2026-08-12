@@ -10,6 +10,10 @@ use crate::{config, keychain, service, proxy};
     version
 )]
 pub struct Cli {
+    /// Run in foreground (don't daemonize)
+    #[arg(long, global = true)]
+    pub foreground: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
