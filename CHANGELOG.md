@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/ruicout0/proxypass/compare/v0.1.1...v0.2.0) (2026-08-12)
+
+
+### Features
+
+* **pac:** fall back to DIRECT when PAC fetch fails after cache expiry ([61b7df9](https://github.com/ruicout0/proxypass/commit/61b7df95204230b3b4f3ddf39f68c9e6c3262af3))
+
+
+### Bug Fixes
+
+* **pac:** aggressive PAC unreachable fallback + network change detection ([724347e](https://github.com/ruicout0/proxypass/commit/724347e914b30598bddf86e685c259c1a55d9128))
+
 ## [0.1.1](https://github.com/ruicout0/proxypass/compare/v0.1.0...v0.1.1) (2026-08-12)
 
 
