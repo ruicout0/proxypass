@@ -119,6 +119,8 @@ jobs:
     needs: [build-macos, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
@@ -128,7 +130,7 @@ jobs:
         run: |
           cd artifacts
           for f in */*.tar.gz */*.zip; do
-            [ -f "$f" ] && gh release upload "${{ github.ref_name }}" "$f"
+            [ -f "$f" ] && gh release upload "${{ github.ref_name }}" "$f" --repo "${{ github.repository }}"
           done
         env:
           GH_TOKEN: ${{ github.token }}
