@@ -25,7 +25,8 @@ rustls-native-certs = "0.7"
 # PAC evaluation (QuickJS)
 rquickjs = { version = "0.6", default-features = false, features = ["classes", "properties", "array-buffer"] }
 
-# Auth (Kerberos/Negotiate)
+# Auth (Kerberos/Negotiate) — not available on Windows, use SSPI instead
+[target.'cfg(not(target_os = "windows"))'.dependencies]
 libgssapi = { version = "0.11" }
 
 # Config

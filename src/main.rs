@@ -1,3 +1,7 @@
+#[cfg(not(target_os = "windows"))]
+mod auth;
+#[cfg(target_os = "windows")]
+#[path = "auth_win.rs"]
 mod auth;
 mod cli;
 mod config;
