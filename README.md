@@ -26,8 +26,8 @@ proxypass test
 ### Homebrew (macOS)
 
 ```bash
-brew tap ruicout0/proxypass
-brew install proxypass
+brew tap ruicout0/proxypass https://github.com/ruicout0/proxypass.git
+brew install ruicout0/proxypass/proxypass
 ```
 
 ### From source
