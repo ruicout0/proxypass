@@ -7,16 +7,16 @@ class Proxypass < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/ruicout0/proxypass/releases/download/v#{version}/proxypass-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_ARM64_SHA256"
+      sha256 "9198dd42b73d5e675016224f23c377fefc40fe9f8b4b82c17be00456970d5732"
     else
       url "https://github.com/ruicout0/proxypass/releases/download/v#{version}/proxypass-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_X86_64_SHA256"
+      sha256 "0fcc7fd3dc11543a8fa5ebf3aead45c6db19b5dbfdfad93ad26c9d90a068c055"
     end
   end
 
   on_linux do
     url "https://github.com/ruicout0/proxypass/releases/download/v#{version}/proxypass-#{version}-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "PLACEHOLDER_LINUX_SHA256"
+    sha256 "b1985eff003b68e210200c2439bdbffff4912053f7af699d78ec4575b18684fa"
   end
 
   def install
