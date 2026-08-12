@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      tag-name:
+        description: Git tag to build and publish
+        required: true
+        type: string
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag-name }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag-name }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --locked --features gssapi --target x86_64-apple-darwin
+
+      - name: Build arm64
+        run: cargo build --release --locked --features gssapi --target aarch64-apple-darwin
+
+      - name: Package macOS binaries
+        env:
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          for TARGET in x86_64-apple-darwin aarch64-apple-darwin; do
+            ARCHIVE="proxypass-${TAG_NAME}-${TARGET}.tar.gz"
+            tar -C "target/${TARGET}/release" -czf "${ARCHIVE}" proxypass
+            shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          done
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: macos
+          path: proxypass-*
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag-name }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Build
+        run: cargo build --release --locked --features gssapi
+
+      - name: Package Linux binary
+        env:
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          ARCHIVE="proxypass-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -C target/release -czf "${ARCHIVE}" proxypass
+          shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: linux
+          path: proxypass-*
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag-name }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --locked --no-default-features
+
+      - name: Package Windows binary
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          $archive = "proxypass-$env:TAG_NAME-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path target\release\proxypass.exe -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "$hash  $archive" | Out-File "$archive.sha256" -Encoding ascii
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: windows
+          path: proxypass-*
+
+  publish:
+    name: Publish assets and formula
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: gh release upload "$TAG_NAME" artifacts/* --repo "${{ github.repository }}" --clobber
+
+      - name: Update Homebrew formula
+        env:
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          ARM64_SHA=$(shasum -a 256 "artifacts/proxypass-${TAG_NAME}-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)
+          X86_SHA=$(shasum -a 256 "artifacts/proxypass-${TAG_NAME}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)
+          LINUX_SHA=$(shasum -a 256 "artifacts/proxypass-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)
+
+          python3 - "$VERSION" "$ARM64_SHA" "$X86_SHA" "$LINUX_SHA" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version, arm64_sha, x86_sha, linux_sha = sys.argv[1:]
+          path = Path("Formula/proxypass.rb")
+          text = path.read_text()
+          text = re.sub(r'^  version ".*"$', f'  version "{version}"', text, flags=re.MULTILINE)
+          shas = iter((arm64_sha, x86_sha, linux_sha))
+          text = re.sub(
+              r'^(\s+sha256 )"[0-9a-f]+"$',
+              lambda match: f'{match.group(1)}"{next(shas)}"',
+              text,
+              flags=re.MULTILINE,
+          )
+          path.write_text(text)
+          PY
+
+      - name: Commit Homebrew formula
+        env:
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/proxypass.rb
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore(formula): update for ${TAG_NAME} [skip ci]"
+          git push origin main
