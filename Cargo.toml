@@ -25,16 +25,12 @@ rustls-native-certs = "0.7"
 # PAC evaluation (QuickJS)
 rquickjs = { version = "0.6", default-features = false, features = ["classes", "properties", "array-buffer"] }
 
-# Auth (Kerberos/Negotiate) — not available on Windows, use SSPI instead
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-libgssapi = { version = "0.11" }
+# Keychain (apple-native only on macOS)
+keyring = "3"
 
 # Config
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
-
-# Keychain
-keyring = { version = "3", features = ["apple-native"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -49,6 +45,16 @@ bytes = "1"
 rpassword = "7"
 libc = "0.2"
 base64 = "0.22"
+
+# Platform-specific deps
+
+# Auth: Kerberos/Negotiate — not available on Windows (uses SSPI instead)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libgssapi = { version = "0.11" }
+
+# Keychain backend — apple-native on macOS only
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 
 [profile.release]
 opt-level = "z"
