@@ -1,6 +1,7 @@
-#[cfg(not(target_os = "windows"))]
+#[cfg(feature = "gssapi")]
+#[path = "auth.rs"]
 mod auth;
-#[cfg(target_os = "windows")]
+#[cfg(not(feature = "gssapi"))]
 #[path = "auth_win.rs"]
 mod auth;
 mod cli;
