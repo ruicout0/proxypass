@@ -51,7 +51,6 @@ base64 = "0.22"
 libgssapi = { version = "0.11", optional = true }
 
 [features]
-default = ["gssapi"]
 gssapi = ["dep:libgssapi"]
 
 [profile.release]
