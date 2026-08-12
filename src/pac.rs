@@ -17,6 +17,10 @@ struct PacInner {
     script: Option<String>,
     fetched_at: Option<Instant>,
     cache_ttl: Duration,
+    /// True when the last PAC fetch failed and the cache is stale.
+    /// When VPN is disconnected, we can't reach the corporate PAC URL —
+    /// fall back to DIRECT for all traffic instead of using stale proxy routes.
+    stale: bool,
 }
 
 impl PacEngine {
@@ -28,20 +32,29 @@ impl PacEngine {
                 script: None,
                 fetched_at: None,
                 cache_ttl: Duration::from_secs(cfg.pac.cache_ttl),
+                stale: false,
             })),
         }
     }
 
     pub async fn find_proxy(&self, url: &str, host: &str) -> Result<String> {
         // Direct proxy mode — no PAC needed
-        {
+        let (direct_proxy, stale) = {
             let inner = self.inner.lock().unwrap();
-            if let Some(ref upstream) = inner.direct_proxy {
-                return Ok(format!("PROXY {}", upstream));
-            }
+            (inner.direct_proxy.clone(), inner.stale)
+        };
+        if let Some(ref upstream) = direct_proxy {
+            return Ok(format!("PROXY {}", upstream));
         }
 
         self.ensure_loaded().await?;
+
+        // If the PAC script is stale (VPN disconnected, fetch failed),
+        // always return DIRECT — don't route through unreachable proxies.
+        if stale {
+            debug!("PAC script is stale (VPN likely disconnected), using DIRECT for: {}", host);
+            return Ok("DIRECT".to_string());
+        }
 
         let script = {
             let inner = self.inner.lock().unwrap();
@@ -52,12 +65,12 @@ impl PacEngine {
     }
 
     async fn ensure_loaded(&self) -> Result<()> {
-        let (needs_fetch, pac_url) = {
+        let (needs_fetch, pac_url, was_stale) = {
             let inner = self.inner.lock().unwrap();
             let stale = inner.fetched_at
                 .map(|t| t.elapsed() > inner.cache_ttl)
                 .unwrap_or(true);
-            (stale || inner.script.is_none(), inner.pac_url.clone())
+            (stale || inner.script.is_none(), inner.pac_url.clone(), stale && inner.script.is_some())
         };
 
         if needs_fetch {
@@ -67,10 +80,20 @@ impl PacEngine {
                         let mut inner = self.inner.lock().unwrap();
                         inner.script = Some(script);
                         inner.fetched_at = Some(Instant::now());
+                        inner.stale = false;
                         debug!("PAC script loaded from {}", url);
                     }
                     Err(e) => {
-                        warn!("Failed to reload PAC: {}, using cached version", e);
+                        // If the PAC URL is unreachable (e.g. VPN disconnected),
+                        // mark the cached script as stale. Traffic will fall back
+                        // to DIRECT instead of routing through an unreachable proxy.
+                        if was_stale {
+                            let mut inner = self.inner.lock().unwrap();
+                            warn!("PAC fetch failed and cache expired — VPN may be disconnected. Falling back to DIRECT for all traffic.");
+                            inner.stale = true;
+                        } else {
+                            warn!("Failed to reload PAC: {}, using cached version", e);
+                        }
                     }
                 }
             }
