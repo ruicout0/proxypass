@@ -5,6 +5,8 @@ use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
@@ -88,6 +90,49 @@ async fn handle_request(
     }
 }
 
+/// Cached SPNEGO token for reuse across connections to the same upstream proxy.
+/// Avoids repeating the GSSAPI handshake on every request, which causes
+/// JetBrains IDE "proxy authentication failed" errors under load.
+struct SpnegoCache {
+    /// Cached Proxy-Authorization header value (e.g. "Negotiate <base64>").
+    token: Mutex<Option<(String, Instant)>>,
+    /// TTL for cached tokens — typically 1 hour, well within TGT lifetime.
+    ttl: Duration,
+}
+
+impl SpnegoCache {
+    fn new() -> Self {
+        Self {
+            token: Mutex::new(None),
+            ttl: Duration::from_secs(3600), // 1 hour
+        }
+    }
+
+    fn get(&self) -> Option<String> {
+        let guard = self.token.lock().unwrap();
+        guard.as_ref().and_then(|(t, ts)| {
+            if ts.elapsed() < self.ttl {
+                Some(t.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn set(&self, token: String) {
+        *self.token.lock().unwrap() = Some((token, Instant::now()));
+    }
+
+    fn clear(&self) {
+        *self.token.lock().unwrap() = None;
+    }
+}
+
+fn spnego_cache() -> &'static SpnegoCache {
+    static CACHE: OnceLock<SpnegoCache> = OnceLock::new();
+    CACHE.get_or_init(|| SpnegoCache::new())
+}
+
 async fn tunnel(
     req: Request<Incoming>,
     upstream: &str,
@@ -106,13 +151,44 @@ async fn tunnel(
         }
     };
 
-    // Initial CONNECT (no auth)
-    let connect_req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n", target, target);
-    tokio::io::AsyncWriteExt::write_all(&mut upstream_stream, connect_req.as_bytes()).await?;
-
+    // Try cached SPNEGO token first to skip the GSSAPI handshake.
+    let cached_token = spnego_cache().get();
     let mut buf = [0u8; 4096];
-    let n = tokio::io::AsyncReadExt::read(&mut upstream_stream, &mut buf).await?;
-    let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+    let mut response_str;
+
+    if let Some(ref token) = cached_token {
+        let connect_req = format!(
+            "CONNECT {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: {}\r\n\r\n",
+            target, target, token
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut upstream_stream, connect_req.as_bytes()).await?;
+        let n = tokio::io::AsyncReadExt::read(&mut upstream_stream, &mut buf).await?;
+        response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+
+        if response_str.contains("200") {
+            debug!("✓ Cached SPNEGO token accepted — skipped GSSAPI handshake");
+        } else if response_str.contains("407") {
+            debug!("Cached SPNEGO token expired, re-authenticating");
+            spnego_cache().clear();
+            // Reconnect — the 407 connection is in a bad state
+            let addr = upstream_stream.peer_addr().ok();
+            if let Some(addr) = addr {
+                upstream_stream = TcpStream::connect(addr).await?;
+            }
+            // Fall through to auth handshake below
+            response_str = String::from("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
+        } else if !response_str.contains("200") {
+            return Ok(error_response(StatusCode::BAD_GATEWAY, "Upstream CONNECT failed"));
+        } else {
+            // 200 — proceed
+        }
+    } else {
+        // Initial CONNECT (no auth)
+        let connect_req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n", target, target);
+        tokio::io::AsyncWriteExt::write_all(&mut upstream_stream, connect_req.as_bytes()).await?;
+        let n = tokio::io::AsyncReadExt::read(&mut upstream_stream, &mut buf).await?;
+        response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+    }
 
     // Multi-step 407/Negotiate handshake — loop up to 5 times
     if response_str.contains("407") {
@@ -127,6 +203,7 @@ async fn tunnel(
             cfg,
         ).await {
             warn!("Auth handshake failed: {}", e);
+            spnego_cache().clear();
             return Ok(error_response(StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Auth failed"));
         }
     } else if !response_str.contains("200") {
@@ -205,6 +282,8 @@ async fn handle_407_handshake(
             for round in 0..4 {
                 if response_str.contains("200") {
                     info!("✓ Negotiate authenticated after {} round(s)", round + 1);
+                    // Cache the successful auth header for reuse
+                    spnego_cache().set(auth_header.clone());
                     return Ok(());
                 }
                 if !response_str.contains("407") {
@@ -240,6 +319,8 @@ async fn handle_407_handshake(
 
             if response_str.contains("200") {
                 info!("✓ Negotiate authenticated successfully");
+                // Cache the final auth token for reuse
+                spnego_cache().set(auth_header.clone());
                 Ok(())
             } else {
                 info!("Negotiate handshake incomplete — trying Basic fallback");
@@ -259,6 +340,7 @@ async fn handle_407_handshake(
             let response_str = String::from_utf8_lossy(&buf[..n]);
             if response_str.contains("200") {
                 info!("✓ Basic authentication succeeded");
+                spnego_cache().set(token);
                 Ok(())
             } else {
                 warn!("Basic authentication rejected");
@@ -327,6 +409,7 @@ async fn negotiate_fallback_to_basic(
     let response_str = String::from_utf8_lossy(&buf[..n]);
     if response_str.contains("200") {
         info!("✓ Basic auth (Negotiate fallback) succeeded");
+        spnego_cache().set(token);
         *stream = new_stream;
         Ok(())
     } else {

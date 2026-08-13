@@ -33,17 +33,24 @@ pub fn detect_scheme(proxy_authenticate: &str) -> AuthScheme {
 /// Try to determine which mechanism works. macOS Heimdal doesn't support
 /// SPNEGO, so we fall back to raw Kerberos which works with most corporate
 /// proxies that accept RFC 4559 Negotiate (Kerberos, not SPNEGO).
+///
+/// Result is cached — GSS mechanism discovery is expensive and the answer
+/// won't change during the process lifetime.
 fn select_mech() -> (Oid<'static>, &'static str) {
-    // Try SPNEGO first — it's the standard approach
-    let mut oids = OidSet::new();
-    if oids.add(GSS_MECH_SPNEGO.clone()).is_ok() {
-        let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids));
-        if cred.is_ok() {
-            return (GSS_MECH_SPNEGO.clone(), "SPNEGO");
+    use std::sync::OnceLock;
+    static MECH: OnceLock<(Oid<'static>, &'static str)> = OnceLock::new();
+    MECH.get_or_init(|| {
+        // Try SPNEGO first — it's the standard approach
+        let mut oids = OidSet::new();
+        if oids.add(GSS_MECH_SPNEGO.clone()).is_ok() {
+            let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids));
+            if cred.is_ok() {
+                return (GSS_MECH_SPNEGO.clone(), "SPNEGO");
+            }
         }
-    }
-    // Fall back to raw Kerberos
-    (GSS_MECH_KRB5.clone(), "Kerberos")
+        // Fall back to raw Kerberos
+        (GSS_MECH_KRB5.clone(), "Kerberos")
+    }).clone()
 }
 
 /// Build a fresh Negotiate context and return the initial token.
