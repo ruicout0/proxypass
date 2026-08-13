@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/ruicout0/proxypass/compare/v0.2.0...v0.2.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **proxy:** cache SPNEGO token to avoid repeated GSSAPI handshake ([43bc846](https://github.com/ruicout0/proxypass/commit/43bc8465394e5529d75db6aa76cfc5e7c845aa96))
+
 ## [0.2.0](https://github.com/ruicout0/proxypass/compare/v0.1.1...v0.2.0) (2026-08-12)
 
 
