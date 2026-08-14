@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.3](https://github.com/ruicout0/proxypass/compare/v0.2.2...v0.2.3) (2026-08-14)
+
+
+### Performance Improvements
+
+* **proxy:** enable TCP_NODELAY on all upstream connections ([62111a2](https://github.com/ruicout0/proxypass/commit/62111a28e235460dd23dc37f0c177990c8c7af69))
+* **proxy:** TCP_NODELAY + socket buffer tuning for proxy throughput ([fc4de75](https://github.com/ruicout0/proxypass/commit/fc4de75f350411031678d04fa78fe706cbaad4cf))
+* **proxy:** tune socket buffers + TCP_NODELAY on all connections ([a7196b5](https://github.com/ruicout0/proxypass/commit/a7196b553ecc33bbd6a32e48a6c869028b0cedd8))
+
 ## [0.2.2](https://github.com/ruicout0/proxypass/compare/v0.2.1...v0.2.2) (2026-08-14)
 
 
