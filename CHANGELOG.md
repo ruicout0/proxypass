@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.7](https://github.com/ruicout0/proxypass/compare/v0.2.6...v0.2.7) (2026-08-14)
+
+
+### Bug Fixes
+
+* remove port from GSSAPI service name in negotiate_init ([f8281a9](https://github.com/ruicout0/proxypass/commit/f8281a9d206005209145754b524dc5c62f198b78))
+
+
+### Performance Improvements
+
+* dedicated JS thread, reduced PAC locks, async keychain ([e9e5803](https://github.com/ruicout0/proxypass/commit/e9e58030bcc2e6bb9335af8222d0178538d2f33c))
+
 ## [0.2.6](https://github.com/ruicout0/proxypass/compare/v0.2.5...v0.2.6) (2026-08-14)
 
 
