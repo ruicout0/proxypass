@@ -41,6 +41,10 @@ async fn handle_connection(
     pac: PacEngine,
     cfg: std::sync::Arc<Config>,
 ) -> Result<()> {
+    // Disable Nagle's algorithm on the client-facing connection too.
+    // When the proxy writes small HTTP responses (407 auth challenges,
+    // status headers) back to the client, Nagle can delay them.
+    let _ = stream.set_nodelay(true);
     let io = TokioIo::new(stream);
     hyper::server::conn::http1::Builder::new()
         .serve_connection(
@@ -133,6 +137,22 @@ fn spnego_cache() -> &'static SpnegoCache {
     CACHE.get_or_init(|| SpnegoCache::new())
 }
 
+/// Apply socket buffer size tuning for proxy throughput.
+///
+/// macOS default TCP window is ~131KB which can limit throughput on
+/// high-BDP (bandwidth-delay product) links. Raising to 256KB helps
+/// bulk downloads through the proxy without affecting latency-sensitive
+/// interactive traffic.
+///
+/// Uses `socket2::SockRef` which works with both tokio and std TcpStreams.
+fn tune_socket_buffers(stream: &tokio::net::TcpStream) -> std::io::Result<()> {
+    use socket2::SockRef;
+    let sock = SockRef::from(stream);
+    let _ = sock.set_recv_buffer_size(256 * 1024);
+    let _ = sock.set_send_buffer_size(256 * 1024);
+    Ok(())
+}
+
 async fn tunnel(
     req: Request<Incoming>,
     upstream: &str,
@@ -144,7 +164,16 @@ async fn tunnel(
     let upstream_port: u16 = upstream.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(3128);
 
     let mut upstream_stream = match TcpStream::connect(upstream).await {
-        Ok(s) => s,
+        Ok(s) => {
+            // Disable Nagle's algorithm — this is critical for proxy throughput.
+            // Without TCP_NODELAY, small writes (TLS handshake packets, SSH
+            // keystrokes, etc.) get delayed up to 40ms waiting for ACKs.
+            let _ = s.set_nodelay(true);
+            // Bump socket buffers for better throughput on high-BDP links.
+            // Best-effort — silently ignore errors.
+            let _ = tune_socket_buffers(&s);
+            s
+        }
         Err(e) => {
             error!("Failed to connect to upstream {}: {}", upstream, e);
             return Ok(error_response(StatusCode::BAD_GATEWAY, "Upstream connection failed"));
@@ -174,6 +203,7 @@ async fn tunnel(
             let addr = upstream_stream.peer_addr().ok();
             if let Some(addr) = addr {
                 upstream_stream = TcpStream::connect(addr).await?;
+                let _ = upstream_stream.set_nodelay(true);
             }
             // Fall through to auth handshake below
             response_str = String::from("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
@@ -426,6 +456,7 @@ async fn negotiate_fallback_to_basic(
     // Reconnect — the Negotiate connection is in an unknown state
     let addr = stream.peer_addr().ok();
     let mut new_stream = TcpStream::connect(addr.unwrap()).await?;
+    let _ = new_stream.set_nodelay(true);
     tokio::io::AsyncWriteExt::write_all(&mut new_stream, req.as_bytes()).await?;
     let n = tokio::io::AsyncReadExt::read(&mut new_stream, buf).await?;
     let response_str = String::from_utf8_lossy(&buf[..n]);
@@ -449,6 +480,7 @@ async fn forward_via_proxy(
     let upstream_port: u16 = upstream.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(3128);
 
     let stream = TcpStream::connect(upstream).await?;
+    let _ = stream.set_nodelay(true);
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
     tokio::spawn(async move { let _ = conn.await; });
@@ -474,6 +506,7 @@ async fn forward_via_proxy(
         if let Some(auth_value) = auth_header {
             // Close old connection and open a fresh one
             let stream = TcpStream::connect(upstream).await?;
+            let _ = stream.set_nodelay(true);
             let io = TokioIo::new(stream);
             let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
             tokio::spawn(async move { let _ = conn.await; });
@@ -554,7 +587,10 @@ async fn forward_direct(
     let host = extract_host(&req);
     if req.method() == Method::CONNECT {
         let stream = match TcpStream::connect(&host).await {
-            Ok(s) => s,
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                s
+            }
             Err(e) => {
                 warn!("Direct connect failed to {}: {}", host, e);
                 return Ok(error_response(StatusCode::BAD_GATEWAY, "Direct connection failed"));

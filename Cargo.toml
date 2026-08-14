@@ -49,6 +49,7 @@ base64 = "0.22"
 # Auth (Kerberos/Negotiate) — use feature flag instead of target.cfg
 # to work around a cargo resolution bug on Windows
 libgssapi = { version = "0.11", optional = true }
+socket2 = "0.6.5"
 
 [features]
 gssapi = ["dep:libgssapi"]
