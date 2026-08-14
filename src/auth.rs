@@ -1,9 +1,8 @@
 use anyhow::{bail, Result};
 use libgssapi::{
     context::{ClientCtx, CtxFlags},
-    credential::{Cred, CredUsage},
     name::Name,
-    oid::{Oid, OidSet, GSS_MECH_KRB5, GSS_MECH_SPNEGO, GSS_NT_HOSTBASED_SERVICE},
+    oid::{Oid, GSS_MECH_KRB5, GSS_MECH_SPNEGO, GSS_NT_HOSTBASED_SERVICE},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -40,24 +39,37 @@ fn select_mech() -> &'static Result<(Oid<'static>, &'static str)> {
     use std::sync::OnceLock;
     static MECH: OnceLock<Result<(Oid<'static>, &'static str)>> = OnceLock::new();
     MECH.get_or_init(|| {
-        // Try SPNEGO first — it's the standard approach
-        let mut oids = OidSet::new();
-        if oids.add(GSS_MECH_SPNEGO.clone()).is_ok() {
-            let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids));
-            if cred.is_ok() {
+        // Try SPNEGO first — test with a real gss_init_sec_context attempt.
+        // Cred::acquire can succeed on macOS Heimdal even though
+        // gss_init_sec_context will fail with GSS_S_BAD_MECH.
+        let name = Name::new(b"HTTP@localhost", Some(GSS_NT_HOSTBASED_SERVICE));
+        if let Ok(name) = name {
+            let mut spnego_ctx = ClientCtx::new(
+                None, // let GSSAPI pick the default credential
+                name,
+                CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
+                Some(GSS_MECH_SPNEGO.clone()),
+            );
+            if spnego_ctx.step(None, None).is_ok() {
                 return Ok((GSS_MECH_SPNEGO.clone(), "SPNEGO"));
             }
         }
-        // Try raw Kerberos next — test that credentials can actually be acquired
-        let mut oids = OidSet::new();
-        if oids.add(GSS_MECH_KRB5.clone()).is_ok() {
-            let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids));
-            if cred.is_ok() {
+        // Try raw Kerberos — gss_init_sec_context with None cred lets
+        // GSSAPI pick the default credential from the system cache.
+        let name = Name::new(b"HTTP@localhost", Some(GSS_NT_HOSTBASED_SERVICE));
+        if let Ok(name) = name {
+            let mut krb5_ctx = ClientCtx::new(
+                None,
+                name,
+                CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
+                Some(GSS_MECH_KRB5.clone()),
+            );
+            if krb5_ctx.step(None, None).is_ok() {
                 return Ok((GSS_MECH_KRB5.clone(), "Kerberos"));
             }
         }
         Err(anyhow::anyhow!(
-            "No GSSAPI mechanism available: SPNEGO and Kerberos credential acquisition both failed. \
+            "No GSSAPI mechanism available: both SPNEGO and Kerberos gss_init_sec_context failed. \
              Check that krb5.conf is configured and a valid TGT is present (klist)."
         ))
     })
@@ -74,14 +86,13 @@ pub fn negotiate_init(proxy_host: &str, proxy_port: u16) -> Result<(String, Nego
     let mech = mech_ref.clone();
     tracing::info!("Using GSS mechanism: {}", mech_name);
 
-    let mut oids = OidSet::new();
-    oids.add(mech.clone()).map_err(|e| anyhow::anyhow!("OidSet add error: {}", e))?;
-
-    let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids))
-        .map_err(|e| anyhow::anyhow!("GSSAPI credential error for {}: {:?}", mech_name, e))?;
-
+    // Don't pre-acquire a credential — on macOS Heimdal, credentials
+    // acquired for a specific mechanism OID set can fail at
+    // gss_init_sec_context time even when gss_acquire_cred succeeds.
+    // Passing None lets GSSAPI pick the default credential, which is
+    // what curl does and what works with Heimdal.
     let mut ctx = ClientCtx::new(
-        Some(cred),
+        None,
         name,
         CtxFlags::GSS_C_MUTUAL_FLAG | CtxFlags::GSS_C_SEQUENCE_FLAG,
         Some(mech),
