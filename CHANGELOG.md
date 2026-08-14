@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.4](https://github.com/ruicout0/proxypass/compare/v0.2.3...v0.2.4) (2026-08-14)
+
+
+### Performance Improvements
+
+* remove worker_threads cap, cache PAC per-host, pool upstream connections, 64KB copy buffer ([e233c75](https://github.com/ruicout0/proxypass/commit/e233c754ebed9854d08368a10b9d784f9f4bcba8))
+* switch opt-level from z to 3 ([3aa3771](https://github.com/ruicout0/proxypass/commit/3aa37710e9ddc360a5e45cb6a692b47f37e19055))
+* switch opt-level from z to 3 ([160561f](https://github.com/ruicout0/proxypass/commit/160561fd7cb1223795aeb8617a608e918064fa72))
+
 ## [0.2.3](https://github.com/ruicout0/proxypass/compare/v0.2.2...v0.2.3) (2026-08-14)
 
 
