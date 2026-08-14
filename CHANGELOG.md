@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/ruicout0/proxypass/compare/v0.2.4...v0.2.5) (2026-08-14)
+
+
+### Bug Fixes
+
+* use macOS-native config path instead of XDG ([246f457](https://github.com/ruicout0/proxypass/commit/246f457ad9155ec81ff501eeba8eb4691bd00174))
+
 ## [0.2.4](https://github.com/ruicout0/proxypass/compare/v0.2.3...v0.2.4) (2026-08-14)
 
 
