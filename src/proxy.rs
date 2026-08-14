@@ -5,12 +5,14 @@ use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{basic_token, detect_scheme, negotiate_init, negotiate_step, AuthScheme};
+use crate::auth::{
+    basic_token, build_forward_auth_header, detect_scheme, extract_negotiate_challenge,
+    extract_proxy_authenticate, negotiate_init, negotiate_round2, negotiate_step,
+    resolve_basic_credentials, spnego_cache, AuthScheme,
+};
 use crate::config::{AuthMethod, Config};
 use crate::keychain;
 use crate::pac::{parse_pac_result, PacEngine, ProxyDirective};
@@ -94,49 +96,6 @@ async fn handle_request(
     }
 }
 
-/// Cached SPNEGO token for reuse across connections to the same upstream proxy.
-/// Avoids repeating the GSSAPI handshake on every request, which causes
-/// JetBrains IDE "proxy authentication failed" errors under load.
-struct SpnegoCache {
-    /// Cached Proxy-Authorization header value (e.g. "Negotiate <base64>").
-    token: Mutex<Option<(String, Instant)>>,
-    /// TTL for cached tokens — typically 1 hour, well within TGT lifetime.
-    ttl: Duration,
-}
-
-impl SpnegoCache {
-    fn new() -> Self {
-        Self {
-            token: Mutex::new(None),
-            ttl: Duration::from_secs(3600), // 1 hour
-        }
-    }
-
-    fn get(&self) -> Option<String> {
-        let guard = self.token.lock().unwrap();
-        guard.as_ref().and_then(|(t, ts)| {
-            if ts.elapsed() < self.ttl {
-                Some(t.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn set(&self, token: String) {
-        *self.token.lock().unwrap() = Some((token, Instant::now()));
-    }
-
-    fn clear(&self) {
-        *self.token.lock().unwrap() = None;
-    }
-}
-
-fn spnego_cache() -> &'static SpnegoCache {
-    static CACHE: OnceLock<SpnegoCache> = OnceLock::new();
-    CACHE.get_or_init(|| SpnegoCache::new())
-}
-
 /// Apply socket buffer size tuning for proxy throughput.
 ///
 /// macOS default TCP window is ~131KB which can limit throughput on
@@ -159,18 +118,12 @@ async fn tunnel(
     cfg: &Config,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     let target = req.uri().to_string();
-    let host_only = req.uri().host().unwrap_or("").to_string();
     let upstream_host = upstream.split(':').next().unwrap_or(upstream);
     let upstream_port: u16 = upstream.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(3128);
 
     let mut upstream_stream = match TcpStream::connect(upstream).await {
         Ok(s) => {
-            // Disable Nagle's algorithm — this is critical for proxy throughput.
-            // Without TCP_NODELAY, small writes (TLS handshake packets, SSH
-            // keystrokes, etc.) get delayed up to 40ms waiting for ACKs.
             let _ = s.set_nodelay(true);
-            // Bump socket buffers for better throughput on high-BDP links.
-            // Best-effort — silently ignore errors.
             let _ = tune_socket_buffers(&s);
             s
         }
@@ -209,8 +162,6 @@ async fn tunnel(
             response_str = String::from("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
         } else if !response_str.contains("200") {
             return Ok(error_response(StatusCode::BAD_GATEWAY, "Upstream CONNECT failed"));
-        } else {
-            // 200 — proceed
         }
     } else {
         // Initial CONNECT (no auth)
@@ -227,7 +178,6 @@ async fn tunnel(
             &mut buf,
             &response_str,
             &target,
-            &host_only,
             upstream_host,
             upstream_port,
             cfg,
@@ -266,7 +216,6 @@ async fn handle_407_handshake(
     buf: &mut [u8],
     initial_response: &str,
     target: &str,
-    _host_only: &str,
     upstream_host: &str,
     upstream_port: u16,
     cfg: &Config,
@@ -289,7 +238,7 @@ async fn handle_407_handshake(
                     Ok(result) => result,
                     Err(e) => {
                         warn!("Negotiate init failed: {}, trying Basic fallback", e);
-                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                        return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
                     }
                 }
             } else {
@@ -297,18 +246,21 @@ async fn handle_407_handshake(
                     Ok((_initial, mut ctx)) => {
                         let decoded = BASE64_STANDARD.decode(&challenge)
                             .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
-                        match negotiate_step(&mut ctx, &decoded)
-                            .map_err(|e| anyhow::anyhow!("Negotiate step: {}", e))? {
-                            Some(t) => (t, ctx),
-                            None => {
+                        match negotiate_step(&mut ctx, &decoded) {
+                            Ok(Some(t)) => (t, ctx),
+                            Ok(None) => {
                                 warn!("Negotiate handshake completed with no token, trying Basic fallback");
-                                return negotiate_fallback_to_basic(stream, buf, target).await;
+                                return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
+                            }
+                            Err(e) => {
+                                warn!("Negotiate step failed: {}, trying Basic fallback", e);
+                                return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
                             }
                         }
                     }
                     Err(e) => {
                         warn!("Negotiate init failed: {}, trying Basic fallback", e);
-                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                        return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
                     }
                 }
             };
@@ -337,14 +289,14 @@ async fn handle_407_handshake(
                 let challenge = extract_negotiate_challenge(&extract_proxy_authenticate(&response_str));
                 if challenge.is_empty() {
                     info!("Negotiate failed — no more challenges, trying Basic fallback");
-                    return negotiate_fallback_to_basic(stream, buf, target).await;
+                    return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
                 }
 
                 let decoded = match BASE64_STANDARD.decode(&challenge) {
                     Ok(d) => d,
                     Err(e) => {
                         warn!("Negotiate challenge base64 decode failed: {}, trying Basic fallback", e);
-                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                        return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
                     }
                 };
                 let next_token = match negotiate_step(&mut neg_ctx, &decoded) {
@@ -355,7 +307,7 @@ async fn handle_407_handshake(
                     }
                     Err(e) => {
                         warn!("Negotiate step failed: {}, trying Basic fallback", e);
-                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                        return negotiate_fallback_to_basic(stream, buf, target, cfg).await;
                     }
                 };
 
@@ -376,12 +328,15 @@ async fn handle_407_handshake(
                 Ok(())
             } else {
                 info!("Negotiate handshake incomplete — trying Basic fallback");
-                negotiate_fallback_to_basic(stream, buf, target).await
+                negotiate_fallback_to_basic(stream, buf, target, cfg).await
             }
         }
         AuthScheme::Basic => {
             info!("Attempting Basic authentication");
-            let (user, pass) = resolve_basic_credentials(cfg)?;
+            let (user, pass) = resolve_basic_credentials(
+                cfg.auth.username.as_deref(),
+                |u| keychain::get_password(u),
+            )?;
             let token = basic_token(&user, &pass);
             let req = format!(
                 "CONNECT {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: {}\r\n\r\n",
@@ -405,46 +360,25 @@ async fn handle_407_handshake(
     }
 }
 
-fn extract_proxy_authenticate(response: &str) -> String {
-    response
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("proxy-authenticate:"))
-        .map(|l| l[19..].trim().to_string())
-        .unwrap_or_default()
-}
-
-fn extract_negotiate_challenge(header: &str) -> String {
-    let lower = header.to_lowercase();
-    if lower.starts_with("negotiate") {
-        header.get(10..).map(|s| s.trim().to_string()).unwrap_or_default()
-    } else if lower.starts_with("kerberos") {
-        header.get(8..).map(|s| s.trim().to_string()).unwrap_or_default()
-    } else {
-        String::new()
-    }
-}
-
 /// Fall back from failed Negotiate to Basic on a new connection.
+/// Uses the Config reference passed in rather than reloading from disk.
 async fn negotiate_fallback_to_basic(
     stream: &mut TcpStream,
     buf: &mut [u8],
     target: &str,
+    cfg: &Config,
 ) -> Result<()> {
-    let cfg = crate::config::load().ok();
-    let (user, pass) = match cfg.as_ref().and_then(|c| c.auth.username.as_ref()) {
-        Some(user) => match crate::keychain::get_password(user) {
-            Ok(pass) => {
-                warn!("Negotiate failed, falling back to Basic auth for {}", user);
-                (user.clone(), pass)
-            }
-            Err(e) => {
-                warn!("Negotiate failed and no Basic password available: {}", e);
-                bail!("Negotiate failed, no Basic fallback credentials");
-            }
-        },
-        None => {
-            warn!("Negotiate failed and no username configured for Basic fallback");
-            bail!("Negotiate failed, no Basic fallback configured");
+    let (user, pass) = match resolve_basic_credentials(
+        cfg.auth.username.as_deref(),
+        |u| crate::keychain::get_password(u),
+    ) {
+        Ok(creds) => {
+            warn!("Negotiate failed, falling back to Basic auth for {}", creds.0);
+            creds
+        }
+        Err(e) => {
+            warn!("Negotiate failed and no Basic password available: {}", e);
+            bail!("Negotiate failed, no Basic fallback credentials");
         }
     };
 
@@ -485,7 +419,7 @@ async fn forward_via_proxy(
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
     tokio::spawn(async move { let _ = conn.await; });
-    
+
     let target_uri = req.uri().clone();
     let (parts, body) = req.into_parts();
     let body_bytes = body.collect().await?.to_bytes();
@@ -501,11 +435,19 @@ async fn forward_via_proxy(
         let proxy_auth = resp.headers()
             .get("proxy-authenticate")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let auth_header = build_forward_auth_header(proxy_auth, upstream_host, upstream_port, cfg)?;
+            .unwrap_or("")
+            .to_string();
+
+        let auth_header = build_forward_auth_header(
+            &proxy_auth,
+            upstream_host,
+            upstream_port,
+            cfg.auth.username.as_deref(),
+            |u| keychain::get_password(u),
+        )?;
 
         if let Some(auth_value) = auth_header {
-            // Close old connection and open a fresh one (don't reuse — auth state differs)
+            // Open a fresh connection with auth
             let stream = TcpStream::connect(upstream).await?;
             let _ = stream.set_nodelay(true);
             let _ = tune_socket_buffers(&stream);
@@ -513,24 +455,70 @@ async fn forward_via_proxy(
             let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
             tokio::spawn(async move { let _ = conn.await; });
 
-            let mut req = Request::from_parts(parts, Full::new(body_bytes));
-            *req.uri_mut() = target_uri;
+            let mut req = Request::from_parts(parts.clone(), Full::new(body_bytes.clone()));
+            *req.uri_mut() = target_uri.clone();
             req.headers_mut().insert(
                 hyper::header::PROXY_AUTHORIZATION,
                 auth_value.parse().unwrap(),
             );
 
             let resp = sender.send_request(req).await?;
-            // If still 407 and Negotiate, try one more Negotiate round with challenge
+
+            // Multi-round Negotiate: if still 407 and Negotiate, try extra rounds
             if resp.status() == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
                 let challenge = resp.headers()
                     .get("proxy-authenticate")
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("");
-                if let Some(_auth_token) = negotiate_round2(challenge, upstream_host, upstream_port)? {
-                    // Full multi-round reconnection would require saving the body;
-                    // for now log and return whatever the server sent.
-                    warn!("Multi-round Negotiate required for forwarded request — auth may not complete");
+
+                if let Some(next_token) = negotiate_round2(challenge, upstream_host, upstream_port)? {
+                    // Reconnect with the next round token
+                    let stream = TcpStream::connect(upstream).await?;
+                    let _ = stream.set_nodelay(true);
+                    let _ = tune_socket_buffers(&stream);
+                    let io = TokioIo::new(stream);
+                    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
+                    tokio::spawn(async move { let _ = conn.await; });
+
+                    let mut req = Request::from_parts(parts.clone(), Full::new(body_bytes.clone()));
+                    *req.uri_mut() = target_uri.clone();
+                    req.headers_mut().insert(
+                        hyper::header::PROXY_AUTHORIZATION,
+                        next_token.parse().unwrap(),
+                    );
+
+                    let resp = sender.send_request(req).await?;
+
+                    // Try one more round if needed (up to 3 total)
+                    if resp.status() == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                        let challenge = resp.headers()
+                            .get("proxy-authenticate")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+
+                        if let Some(next_token) = negotiate_round2(challenge, upstream_host, upstream_port)? {
+                            let stream = TcpStream::connect(upstream).await?;
+                            let _ = stream.set_nodelay(true);
+                            let _ = tune_socket_buffers(&stream);
+                            let io = TokioIo::new(stream);
+                            let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
+                            tokio::spawn(async move { let _ = conn.await; });
+
+                            let mut req = Request::from_parts(parts, Full::new(body_bytes));
+                            *req.uri_mut() = target_uri;
+                            req.headers_mut().insert(
+                                hyper::header::PROXY_AUTHORIZATION,
+                                next_token.parse().unwrap(),
+                            );
+
+                            let resp = sender.send_request(req).await?;
+                            let (resp_parts, body) = resp.into_parts();
+                            return Ok(Response::from_parts(resp_parts, body.map_err(|e| e).boxed()));
+                        }
+                    }
+
+                    let (resp_parts, body) = resp.into_parts();
+                    return Ok(Response::from_parts(resp_parts, body.map_err(|e| e).boxed()));
                 }
             }
 
@@ -541,46 +529,6 @@ async fn forward_via_proxy(
 
     let (resp_parts, body) = resp.into_parts();
     Ok(Response::from_parts(resp_parts, body.map_err(|e| e).boxed()))
-}
-
-/// Build a Proxy-Authorization header for forwarded (non-CONNECT) requests.
-fn build_forward_auth_header(
-    proxy_authenticate: &str,
-    upstream_host: &str,
-    upstream_port: u16,
-    cfg: &Config,
-) -> Result<Option<String>> {
-    match detect_scheme(proxy_authenticate) {
-        AuthScheme::Negotiate => {
-            if cfg.auth.method == AuthMethod::None {
-                return Ok(None);
-            }
-            match negotiate_init(upstream_host, upstream_port) {
-                Ok((token, _ctx)) => Ok(Some(token)),
-                Err(e) => {
-                    warn!("Negotiate init failed: {}, falling back to Basic", e);
-                    resolve_basic_auth(cfg)
-                }
-            }
-        }
-        AuthScheme::Basic => resolve_basic_auth(cfg),
-        AuthScheme::None => Ok(None),
-    }
-}
-
-fn resolve_basic_auth(cfg: &Config) -> Result<Option<String>> {
-    let (user, pass) = resolve_basic_credentials(cfg)?;
-    Ok(Some(basic_token(&user, &pass)))
-}
-
-fn resolve_basic_credentials(cfg: &Config) -> Result<(String, String)> {
-    match &cfg.auth.username {
-        Some(user) => match keychain::get_password(user) {
-            Ok(pass) => Ok((user.clone(), pass)),
-            Err(e) => bail!("No keychain password for {}: {}", user, e),
-        },
-        None => bail!("No username configured"),
-    }
 }
 
 async fn forward_direct(
@@ -612,53 +560,6 @@ async fn forward_direct(
     } else {
         Ok(error_response(StatusCode::NOT_IMPLEMENTED, "Direct HTTP not supported"))
     }
-}
-
-/// Attempt a second Negotiate round if the server sent a challenge token in
-/// the 407. Returns a new auth header value if successful.
-fn negotiate_round2(
-    proxy_authenticate: &str,
-    upstream_host: &str,
-    upstream_port: u16,
-) -> Result<Option<String>> {
-    let challenge = extract_negotiate_challenge(proxy_authenticate);
-    if challenge.is_empty() {
-        return Ok(None);
-    }
-    let decoded = match BASE64_STANDARD.decode(&challenge) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("Negotiate round2 base64 decode failed: {}", e);
-            return Ok(None);
-        }
-    };
-    // Re-init and immediately step with the challenge
-    let (_initial, mut ctx) = match negotiate_init(upstream_host, upstream_port) {
-        Ok(result) => result,
-        Err(e) => {
-            warn!("Negotiate round2 init failed: {}", e);
-            return Ok(None);
-        }
-    };
-    match negotiate_step(&mut ctx, &decoded) {
-        Ok(t) => Ok(t),
-        Err(e) => {
-            warn!("Negotiate round2 step failed: {}", e);
-            Ok(None)
-        }
-    }
-}
-
-/// Stub: old single-step auth builder, kept for reference but no longer used.
-#[allow(dead_code)]
-fn build_auth_header(
-    response: &str,
-    host: &str,
-    port: u16,
-    cfg: &Config,
-) -> Result<Option<String>> {
-    let proxy_auth_header = extract_proxy_authenticate(response);
-    build_forward_auth_header(&proxy_auth_header, host, port, cfg)
 }
 
 fn extract_host(req: &Request<Incoming>) -> String {
