@@ -255,17 +255,31 @@ async fn handle_407_handshake(
             let challenge = extract_negotiate_challenge(&proxy_auth_header);
 
             let (auth_header, mut neg_ctx) = if challenge.is_empty() {
-                negotiate_init(upstream_host, upstream_port)
-                    .map_err(|e| anyhow::anyhow!("Negotiate init: {}", e))?
+                match negotiate_init(upstream_host, upstream_port) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!("Negotiate init failed: {}, trying Basic fallback", e);
+                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                    }
+                }
             } else {
-                let (_initial, mut ctx) = negotiate_init(upstream_host, upstream_port)
-                    .map_err(|e| anyhow::anyhow!("Negotiate init: {}", e))?;
-                let decoded = BASE64_STANDARD.decode(&challenge)
-                    .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
-                match negotiate_step(&mut ctx, &decoded)
-                    .map_err(|e| anyhow::anyhow!("Negotiate step: {}", e))? {
-                    Some(t) => (t, ctx),
-                    None => bail!("Negotiate handshake completed with no token"),
+                match negotiate_init(upstream_host, upstream_port) {
+                    Ok((_initial, mut ctx)) => {
+                        let decoded = BASE64_STANDARD.decode(&challenge)
+                            .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
+                        match negotiate_step(&mut ctx, &decoded)
+                            .map_err(|e| anyhow::anyhow!("Negotiate step: {}", e))? {
+                            Some(t) => (t, ctx),
+                            None => {
+                                warn!("Negotiate handshake completed with no token, trying Basic fallback");
+                                return negotiate_fallback_to_basic(stream, buf, target).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Negotiate init failed: {}, trying Basic fallback", e);
+                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                    }
                 }
             };
 
@@ -296,14 +310,22 @@ async fn handle_407_handshake(
                     return negotiate_fallback_to_basic(stream, buf, target).await;
                 }
 
-                let decoded = BASE64_STANDARD.decode(&challenge)
-                    .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
-                let next_token = match negotiate_step(&mut neg_ctx, &decoded)
-                    .map_err(|e| anyhow::anyhow!("Negotiate step: {}", e))? {
-                    Some(t) => t,
-                    None => {
+                let decoded = match BASE64_STANDARD.decode(&challenge) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("Negotiate challenge base64 decode failed: {}, trying Basic fallback", e);
+                        return negotiate_fallback_to_basic(stream, buf, target).await;
+                    }
+                };
+                let next_token = match negotiate_step(&mut neg_ctx, &decoded) {
+                    Ok(Some(t)) => t,
+                    Ok(None) => {
                         info!("Negotiate handshake complete, verifying...");
                         break; // Context says done, check final response
+                    }
+                    Err(e) => {
+                        warn!("Negotiate step failed: {}, trying Basic fallback", e);
+                        return negotiate_fallback_to_basic(stream, buf, target).await;
                     }
                 };
 
@@ -565,11 +587,28 @@ fn negotiate_round2(
     if challenge.is_empty() {
         return Ok(None);
     }
-    let decoded = BASE64_STANDARD.decode(&challenge)
-        .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
+    let decoded = match BASE64_STANDARD.decode(&challenge) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Negotiate round2 base64 decode failed: {}", e);
+            return Ok(None);
+        }
+    };
     // Re-init and immediately step with the challenge
-    let (_initial, mut ctx) = negotiate_init(upstream_host, upstream_port)?;
-    negotiate_step(&mut ctx, &decoded)
+    let (_initial, mut ctx) = match negotiate_init(upstream_host, upstream_port) {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("Negotiate round2 init failed: {}", e);
+            return Ok(None);
+        }
+    };
+    match negotiate_step(&mut ctx, &decoded) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            warn!("Negotiate round2 step failed: {}", e);
+            Ok(None)
+        }
+    }
 }
 
 /// Stub: old single-step auth builder, kept for reference but no longer used.
