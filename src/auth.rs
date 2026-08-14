@@ -36,21 +36,31 @@ pub fn detect_scheme(proxy_authenticate: &str) -> AuthScheme {
 ///
 /// Result is cached — GSS mechanism discovery is expensive and the answer
 /// won't change during the process lifetime.
-fn select_mech() -> (Oid<'static>, &'static str) {
+fn select_mech() -> &'static Result<(Oid<'static>, &'static str)> {
     use std::sync::OnceLock;
-    static MECH: OnceLock<(Oid<'static>, &'static str)> = OnceLock::new();
+    static MECH: OnceLock<Result<(Oid<'static>, &'static str)>> = OnceLock::new();
     MECH.get_or_init(|| {
         // Try SPNEGO first — it's the standard approach
         let mut oids = OidSet::new();
         if oids.add(GSS_MECH_SPNEGO.clone()).is_ok() {
             let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids));
             if cred.is_ok() {
-                return (GSS_MECH_SPNEGO.clone(), "SPNEGO");
+                return Ok((GSS_MECH_SPNEGO.clone(), "SPNEGO"));
             }
         }
-        // Fall back to raw Kerberos
-        (GSS_MECH_KRB5.clone(), "Kerberos")
-    }).clone()
+        // Try raw Kerberos next — test that credentials can actually be acquired
+        let mut oids = OidSet::new();
+        if oids.add(GSS_MECH_KRB5.clone()).is_ok() {
+            let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&oids));
+            if cred.is_ok() {
+                return Ok((GSS_MECH_KRB5.clone(), "Kerberos"));
+            }
+        }
+        Err(anyhow::anyhow!(
+            "No GSSAPI mechanism available: SPNEGO and Kerberos credential acquisition both failed. \
+             Check that krb5.conf is configured and a valid TGT is present (klist)."
+        ))
+    })
 }
 
 /// Build a fresh Negotiate context and return the initial token.
@@ -60,7 +70,8 @@ pub fn negotiate_init(proxy_host: &str, proxy_port: u16) -> Result<(String, Nego
     let name = Name::new(service_name.as_bytes(), Some(GSS_NT_HOSTBASED_SERVICE))
         .map_err(|e| anyhow::anyhow!("GSSAPI name error: {:?}", e))?;
 
-    let (mech, mech_name) = select_mech();
+    let (mech_ref, mech_name) = select_mech().as_ref().map_err(|e| anyhow::anyhow!("GSSAPI credential error: {}", e))?;
+    let mech = mech_ref.clone();
     tracing::info!("Using GSS mechanism: {}", mech_name);
 
     let mut oids = OidSet::new();
