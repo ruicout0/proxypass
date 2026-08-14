@@ -79,11 +79,29 @@ impl Default for Config {
     }
 }
 
+/// Returns the path to the config file.
+///
+/// On macOS, uses `~/Library/Application Support/proxypass/proxypass.toml`
+/// to follow the platform convention. On other platforms, uses
+/// `$XDG_CONFIG_HOME/proxypass/proxypass.toml` (typically `~/.config/…`).
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("proxypass")
-        .join("proxypass.toml")
+    let base = if cfg!(target_os = "macos") {
+        dirs::data_dir()
+    } else {
+        dirs::config_dir()
+    };
+    base.unwrap_or_else(|| {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("~"));
+        if cfg!(target_os = "macos") {
+            home.join("Library/Application Support")
+        } else {
+            home.join(".config")
+        }
+    })
+    .join("proxypass")
+    .join("proxypass.toml")
 }
 
 pub fn load() -> Result<Config> {
