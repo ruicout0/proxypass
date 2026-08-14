@@ -78,8 +78,10 @@ fn select_mech() -> &'static Result<(Oid<'static>, &'static str)> {
 
 /// Build a fresh Negotiate context and return the initial token.
 /// Call `negotiate_step()` for subsequent challenge/response rounds.
-pub fn negotiate_init(proxy_host: &str, proxy_port: u16) -> Result<(String, NegotiateContext)> {
-    let service_name = format!("HTTP@{}:{}", proxy_host, proxy_port);
+pub fn negotiate_init(proxy_host: &str, _proxy_port: u16) -> Result<(String, NegotiateContext)> {
+    // GSSAPI service names should NOT include the port — use hostname only.
+    let service_name = format!("HTTP@{}", proxy_host);
+    tracing::debug!("GSSAPI service name: {}", service_name);
     let name = Name::new(service_name.as_bytes(), Some(GSS_NT_HOSTBASED_SERVICE))
         .map_err(|e| anyhow::anyhow!("GSSAPI name error: {:?}", e))?;
 
