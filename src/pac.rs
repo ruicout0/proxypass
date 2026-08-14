@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rquickjs::{Context as JsContext, Runtime};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -29,6 +30,9 @@ struct PacInner {
     state: PacState,
     /// Track the last known network interface set to detect VPN changes.
     last_ifaddrs_hash: u64,
+    /// Per-host PAC result cache to avoid re-evaluating the JS runtime
+    /// for the same host on every request.
+    host_cache: HashMap<String, (String, Instant)>,
 }
 
 impl PacEngine {
@@ -43,6 +47,7 @@ impl PacEngine {
                 cache_ttl: Duration::from_secs(cfg.pac.cache_ttl),
                 state: PacState::Healthy,
                 last_ifaddrs_hash: hash,
+                host_cache: HashMap::new(),
             })),
         }
     }
@@ -69,12 +74,31 @@ impl PacEngine {
             }
         }
 
+        // Check per-host cache before evaluating PAC
+        {
+            let inner = self.inner.lock().unwrap();
+            if let Some((result, ts)) = inner.host_cache.get(host) {
+                if ts.elapsed() < inner.cache_ttl {
+                    debug!("PAC cache hit for: {}", host);
+                    return Ok(result.clone());
+                }
+            }
+        }
+
         let script = {
             let inner = self.inner.lock().unwrap();
             inner.script.clone().unwrap_or_default()
         };
 
-        evaluate_pac(&script, url, host)
+        let result = evaluate_pac(&script, url, host)?;
+
+        // Cache the result per host
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.host_cache.insert(host.to_string(), (result.clone(), Instant::now()));
+        }
+
+        Ok(result)
     }
 
     /// Check if network interfaces changed (e.g. VPN connected/disconnected).
@@ -89,6 +113,7 @@ impl PacEngine {
             );
             inner.state = PacState::Healthy;
             inner.fetched_at = None; // force refresh
+            inner.host_cache.clear(); // invalidate all cached results
             inner.last_ifaddrs_hash = new_hash;
         }
     }
@@ -110,6 +135,7 @@ impl PacEngine {
                         let mut inner = self.inner.lock().unwrap();
                         inner.script = Some(script);
                         inner.fetched_at = Some(Instant::now());
+                        inner.host_cache.clear(); // new script, invalidate cache
                         if inner.state == PacState::Unreachable {
                             info!("PAC URL reachable again — VPN connected, resuming proxying");
                         }
@@ -117,8 +143,6 @@ impl PacEngine {
                         debug!("PAC script loaded from {}", url);
                     }
                     Err(e) => {
-                        // Aggressive: if PAC URL is unreachable, always go DIRECT.
-                        // Don't wait for cache TTL — stale proxy routes are useless.
                         let mut inner = self.inner.lock().unwrap();
                         if inner.state != PacState::Unreachable {
                             warn!(
@@ -137,21 +161,17 @@ impl PacEngine {
 }
 
 /// Build a simple hash of active non-loopback network interfaces.
-/// Used to detect VPN connect/disconnect events without polling.
 fn hash_network_interfaces() -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
 
-    // Collect active non-loopback interface names via OS command.
-    // This is portable and avoids adding a crate just for ifaddrs.
     match network_interface_names() {
         Ok(mut names) => {
             names.sort();
             names.hash(&mut hasher);
         }
         Err(_) => {
-            // Can't detect interfaces — hash stays 0, no spurious resets.
             hasher.write_u8(0);
         }
     }
@@ -160,7 +180,6 @@ fn hash_network_interfaces() -> u64 {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn network_interface_names() -> Result<Vec<String>> {
-    // Use getifaddrs via libc (already a dep).
     use std::ffi::CStr;
     unsafe {
         let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -172,7 +191,6 @@ fn network_interface_names() -> Result<Vec<String>> {
         while !ptr.is_null() {
             let addr = (*ptr).ifa_addr;
             let name = CStr::from_ptr((*ptr).ifa_name).to_string_lossy().to_string();
-            // Skip loopback and link-local
             if !name.starts_with("lo") && !name.starts_with("llw") && !name.starts_with("anpi")
                 && !name.starts_with("utun") && !name.starts_with("gif")
                 && !name.starts_with("stf")
@@ -192,16 +210,25 @@ fn network_interface_names() -> Result<Vec<String>> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn network_interface_names() -> Result<Vec<String>> {
-    // Fallback: just hash empty — network change detection unavailable.
     Ok(Vec::new())
 }
 
+/// Reusable reqwest client for PAC fetching — avoids creating a new
+/// client + TLS config on every PAC refresh.
+fn pac_http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .tls_built_in_root_certs(true)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("Failed to build PAC HTTP client")
+    })
+}
+
 async fn fetch_pac(url: &str) -> Result<String> {
-    let client = reqwest::Client::builder()
-        .tls_built_in_root_certs(true)
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let body = client.get(url).send().await?.text().await?;
+    let body = pac_http_client().get(url).send().await?.text().await?;
     Ok(body)
 }
 

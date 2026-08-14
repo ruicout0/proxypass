@@ -15,6 +15,52 @@ use crate::config::{AuthMethod, Config};
 use crate::keychain;
 use crate::pac::{parse_pac_result, PacEngine, ProxyDirective};
 
+/// Simple connection pool for upstream proxy connections.
+/// Reuses idle HTTP/1.1 connections to avoid TCP+TLS handshake per request.
+mod upstream_pool {
+    use super::*;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex as TokioMutex;
+
+    struct PoolEntry {
+        sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    }
+
+    static POOL: std::sync::OnceLock<TokioMutex<HashMap<String, Vec<PoolEntry>>>> = 
+        std::sync::OnceLock::new();
+
+    fn pool() -> &'static TokioMutex<HashMap<String, Vec<PoolEntry>>> {
+        POOL.get_or_init(|| TokioMutex::new(HashMap::new()))
+    }
+
+    pub async fn get_or_connect(upstream: &str) -> Result<(hyper::client::conn::http1::SendRequest<Full<Bytes>>, bool)> {
+        let mut pool = pool().lock().await;
+        if let Some(entries) = pool.get_mut(upstream) {
+            if let Some(entry) = entries.pop() {
+                debug!("Reusing pooled connection to {}", upstream);
+                return Ok((entry.sender, true));
+            }
+        }
+        drop(pool);
+
+        // No idle connection — create new one
+        let stream = TcpStream::connect(upstream).await?;
+        let _ = stream.set_nodelay(true);
+        let _ = tune_socket_buffers(&stream);
+        let io = TokioIo::new(stream);
+        let (sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
+        tokio::spawn(async move { let _ = conn.await; });
+        Ok((sender, false))
+    }
+
+    pub async fn return_to_pool(upstream: &str, sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>) {
+        let mut pool = pool().lock().await;
+        pool.entry(upstream.to_string())
+            .or_default()
+            .push(PoolEntry { sender });
+    }
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", cfg.proxy.listen, cfg.proxy.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
@@ -153,6 +199,35 @@ fn tune_socket_buffers(stream: &tokio::net::TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Bidirectional copy with a 64KB buffer — 8× larger than tokio's default 8KB.
+/// Reduces syscall overhead for bulk downloads (brew bottles, large API responses).
+async fn copy_bidirectional_large_buf<A, B>(a: &mut A, b: &mut B) -> std::io::Result<()>
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + ?Sized,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const BUF_SIZE: usize = 64 * 1024;
+    let mut a_to_b_buf = vec![0u8; BUF_SIZE];
+    let mut b_to_a_buf = vec![0u8; BUF_SIZE];
+
+    loop {
+        tokio::select! {
+            result = a.read(&mut a_to_b_buf) => {
+                let n = result?;
+                if n == 0 { break; }
+                b.write_all(&a_to_b_buf[..n]).await?;
+            }
+            result = b.read(&mut b_to_a_buf) => {
+                let n = result?;
+                if n == 0 { break; }
+                a.write_all(&b_to_a_buf[..n]).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn tunnel(
     req: Request<Incoming>,
     upstream: &str,
@@ -244,7 +319,7 @@ async fn tunnel(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let mut upgraded = TokioIo::new(upgraded);
-                if let Err(e) = tokio::io::copy_bidirectional(&mut upgraded, &mut upstream_stream).await {
+                if let Err(e) = copy_bidirectional_large_buf(&mut upgraded, &mut upstream_stream).await {
                     debug!("Tunnel closed: {}", e);
                 }
             }
@@ -479,11 +554,10 @@ async fn forward_via_proxy(
     let upstream_host = upstream.split(':').next().unwrap_or(upstream);
     let upstream_port: u16 = upstream.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(3128);
 
-    let stream = TcpStream::connect(upstream).await?;
-    let _ = stream.set_nodelay(true);
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
-    tokio::spawn(async move { let _ = conn.await; });
+    let (mut sender, reused) = upstream_pool::get_or_connect(upstream).await?;
+    if reused {
+        debug!("Reused pooled connection to {}", upstream);
+    }
 
     let target_uri = req.uri().clone();
     let (parts, body) = req.into_parts();
@@ -504,9 +578,10 @@ async fn forward_via_proxy(
         let auth_header = build_forward_auth_header(proxy_auth, upstream_host, upstream_port, cfg)?;
 
         if let Some(auth_value) = auth_header {
-            // Close old connection and open a fresh one
+            // Close old connection and open a fresh one (don't reuse — auth state differs)
             let stream = TcpStream::connect(upstream).await?;
             let _ = stream.set_nodelay(true);
+            let _ = tune_socket_buffers(&stream);
             let io = TokioIo::new(stream);
             let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await?;
             tokio::spawn(async move { let _ = conn.await; });
@@ -536,6 +611,9 @@ async fn forward_via_proxy(
             return Ok(Response::from_parts(resp_parts, body.map_err(|e| e).boxed()));
         }
     }
+
+    // Return connection to pool for reuse
+    upstream_pool::return_to_pool(upstream, sender).await;
 
     let (resp_parts, body) = resp.into_parts();
     Ok(Response::from_parts(resp_parts, body.map_err(|e| e).boxed()))
@@ -601,7 +679,7 @@ async fn forward_direct(
                 Ok(upgraded) => {
                     let mut upgraded = TokioIo::new(upgraded);
                     let mut stream = stream;
-                    let _ = tokio::io::copy_bidirectional(&mut upgraded, &mut stream).await;
+                    let _ = copy_bidirectional_large_buf(&mut upgraded, &mut stream).await;
                 }
                 Err(e) => error!("Direct upgrade error: {}", e),
             }

@@ -15,7 +15,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::Cli;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     cli::run(cli).await
