@@ -35,6 +35,9 @@ keyring = "3"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Channels for dedicated worker threads
+crossbeam-channel = "0.5"
+
 # Utilities
 anyhow = "1"
 tracing = "0.1"

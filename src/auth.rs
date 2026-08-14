@@ -5,6 +5,8 @@ use libgssapi::{
     oid::{Oid, GSS_MECH_KRB5, GSS_MECH_SPNEGO, GSS_NT_HOSTBASED_SERVICE},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub enum AuthScheme {
     Negotiate,
@@ -36,7 +38,6 @@ pub fn detect_scheme(proxy_authenticate: &str) -> AuthScheme {
 /// Result is cached — GSS mechanism discovery is expensive and the answer
 /// won't change during the process lifetime.
 fn select_mech() -> &'static Result<(Oid<'static>, &'static str)> {
-    use std::sync::OnceLock;
     static MECH: OnceLock<Result<(Oid<'static>, &'static str)>> = OnceLock::new();
     MECH.get_or_init(|| {
         // Try SPNEGO first — test with a real gss_init_sec_context attempt.
@@ -77,8 +78,10 @@ fn select_mech() -> &'static Result<(Oid<'static>, &'static str)> {
 
 /// Build a fresh Negotiate context and return the initial token.
 /// Call `negotiate_step()` for subsequent challenge/response rounds.
-pub fn negotiate_init(proxy_host: &str, proxy_port: u16) -> Result<(String, NegotiateContext)> {
-    let service_name = format!("HTTP@{}:{}", proxy_host, proxy_port);
+pub fn negotiate_init(proxy_host: &str, _proxy_port: u16) -> Result<(String, NegotiateContext)> {
+    // GSSAPI service names should NOT include the port — use hostname only.
+    let service_name = format!("HTTP@{}", proxy_host);
+    tracing::debug!("GSSAPI service name: {}", service_name);
     let name = Name::new(service_name.as_bytes(), Some(GSS_NT_HOSTBASED_SERVICE))
         .map_err(|e| anyhow::anyhow!("GSSAPI name error: {:?}", e))?;
 
@@ -86,11 +89,6 @@ pub fn negotiate_init(proxy_host: &str, proxy_port: u16) -> Result<(String, Nego
     let mech = mech_ref.clone();
     tracing::info!("Using GSS mechanism: {}", mech_name);
 
-    // Don't pre-acquire a credential — on macOS Heimdal, credentials
-    // acquired for a specific mechanism OID set can fail at
-    // gss_init_sec_context time even when gss_acquire_cred succeeds.
-    // Passing None lets GSSAPI pick the default credential, which is
-    // what curl does and what works with Heimdal.
     let mut ctx = ClientCtx::new(
         None,
         name,
@@ -126,4 +124,164 @@ pub fn negotiate_step(ctx: &mut NegotiateContext, challenge: &[u8]) -> Result<Op
 pub fn basic_token(username: &str, password: &str) -> String {
     let credentials = format!("{}:{}", username, password);
     format!("Basic {}", BASE64.encode(credentials.as_bytes()))
+}
+
+// ── SPNEGO token cache ─────────────────────────────────────────────────────────
+
+/// Cached SPNEGO token for reuse across connections to the same upstream proxy.
+/// Avoids repeating the GSSAPI handshake on every request, which causes
+/// JetBrains IDE "proxy authentication failed" errors under load.
+pub(crate) struct SpnegoCache {
+    token: Mutex<Option<(String, Instant)>>,
+    ttl: Duration,
+}
+
+impl SpnegoCache {
+    fn new() -> Self {
+        Self {
+            token: Mutex::new(None),
+            ttl: Duration::from_secs(3600), // 1 hour
+        }
+    }
+
+    pub fn get(&self) -> Option<String> {
+        let guard = self.token.lock().unwrap();
+        guard.as_ref().and_then(|(t, ts)| {
+            if ts.elapsed() < self.ttl {
+                Some(t.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn set(&self, token: String) {
+        *self.token.lock().unwrap() = Some((token, Instant::now()));
+    }
+
+    pub fn clear(&self) {
+        *self.token.lock().unwrap() = None;
+    }
+}
+
+pub fn spnego_cache() -> &'static SpnegoCache {
+    static CACHE: OnceLock<SpnegoCache> = OnceLock::new();
+    CACHE.get_or_init(|| SpnegoCache::new())
+}
+
+// ── Auth header helpers ────────────────────────────────────────────────────────
+
+/// Extract the value of the Proxy-Authenticate header from a raw HTTP response.
+pub fn extract_proxy_authenticate(response: &str) -> String {
+    response
+        .lines()
+        .find(|l| l.to_lowercase().starts_with("proxy-authenticate:"))
+        .map(|l| l[19..].trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Extract the base64 challenge token from a Negotiate or Kerberos
+/// Proxy-Authenticate header value.
+pub fn extract_negotiate_challenge(header: &str) -> String {
+    let lower = header.to_lowercase();
+    if lower.starts_with("negotiate") {
+        header.get(10..).map(|s| s.trim().to_string()).unwrap_or_default()
+    } else if lower.starts_with("kerberos") {
+        header.get(8..).map(|s| s.trim().to_string()).unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// Resolve username + keychain password for Basic auth.
+pub fn resolve_basic_credentials(
+    username: Option<&str>,
+    get_password: impl FnOnce(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<(String, String)> {
+    match username {
+        Some(user) => match get_password(user) {
+            Ok(pass) => Ok((user.to_string(), pass)),
+            Err(e) => anyhow::bail!("No keychain password for {}: {}", user, e),
+        },
+        None => anyhow::bail!("No username configured"),
+    }
+}
+
+/// Resolve Basic credentials from username + password string directly.
+/// Use when the password was already resolved (e.g., via async keychain access).
+pub fn resolve_basic_credentials_from_password(
+    username: Option<&str>,
+    password: &str,
+) -> anyhow::Result<(String, String)> {
+    match username {
+        Some(user) => Ok((user.to_string(), password.to_string())),
+        None => anyhow::bail!("No username configured"),
+    }
+}
+
+/// Build a Proxy-Authorization header for forwarded (non-CONNECT) requests.
+pub fn build_forward_auth_header(
+    proxy_authenticate: &str,
+    upstream_host: &str,
+    upstream_port: u16,
+    username: Option<&str>,
+    get_password: impl FnOnce(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<Option<String>> {
+    match detect_scheme(proxy_authenticate) {
+        AuthScheme::Negotiate => {
+            match negotiate_init(upstream_host, upstream_port) {
+                Ok((token, _ctx)) => Ok(Some(token)),
+                Err(e) => {
+                    tracing::warn!("Negotiate init failed: {}, falling back to Basic", e);
+                    Ok(resolve_basic_auth(username, get_password))
+                }
+            }
+        }
+        AuthScheme::Basic => Ok(resolve_basic_auth(username, get_password)),
+        AuthScheme::None => Ok(None),
+    }
+}
+
+fn resolve_basic_auth(
+    username: Option<&str>,
+    get_password: impl FnOnce(&str) -> anyhow::Result<String>,
+) -> Option<String> {
+    resolve_basic_credentials(username, get_password)
+        .ok()
+        .map(|(u, p)| basic_token(&u, &p))
+}
+
+/// Attempt a second Negotiate round if the server sent a challenge token in
+/// the 407. Returns a new auth header value if successful.
+pub fn negotiate_round2(
+    proxy_authenticate: &str,
+    upstream_host: &str,
+    upstream_port: u16,
+) -> anyhow::Result<Option<String>> {
+    let challenge = extract_negotiate_challenge(proxy_authenticate);
+    if challenge.is_empty() {
+        return Ok(None);
+    }
+    let decoded = match BASE64.decode(&challenge) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Negotiate round2 base64 decode failed: {}", e);
+            return Ok(None);
+        }
+    };
+    // Re-init and immediately step with the challenge
+    let (_initial, mut ctx) = match negotiate_init(upstream_host, upstream_port) {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!("Negotiate round2 init failed: {}", e);
+            return Ok(None);
+        }
+    };
+    match negotiate_step(&mut ctx, &decoded) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            tracing::warn!("Negotiate round2 step failed: {}", e);
+            Ok(None)
+        }
+    }
 }
