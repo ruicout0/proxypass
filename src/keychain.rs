@@ -19,3 +19,12 @@ pub fn get_password(username: &str) -> Result<String> {
         .with_context(|| format!("No password found in keychain for user '{}'", username))
 }
 
+/// Async wrapper that runs the blocking keychain access on a dedicated
+/// blocking thread, avoiding stalls on the tokio async runtime.
+pub async fn get_password_async(username: &str) -> Result<String> {
+    let username = username.to_string();
+    tokio::task::spawn_blocking(move || get_password(&username))
+        .await
+        .context("Keychain access panicked")?
+}
+

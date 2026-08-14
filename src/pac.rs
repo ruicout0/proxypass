@@ -3,13 +3,115 @@ use rquickjs::{Context as JsContext, Runtime};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
+
+/// A message sent to the dedicated JS worker thread.
+struct JsRequest {
+    url: String,
+    host: String,
+    script: String,
+    response: crossbeam_channel::Sender<Result<String>>,
+}
+
+/// Owns a persistent rquickjs Runtime on a dedicated OS thread.
+/// Communicates via crossbeam channels — the Runtime is never shared
+/// across threads (it lives entirely inside the worker).
+struct JsWorker {
+    sender: crossbeam_channel::Sender<JsRequest>,
+    /// Kept to join on Drop
+    _handle: std::thread::JoinHandle<()>,
+}
+
+impl JsWorker {
+    fn new() -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded::<JsRequest>();
+        let handle = std::thread::spawn(move || {
+            let rt = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    error!("Failed to create JS Runtime: {}", e);
+                    // Drain requests and respond with errors
+                    while let Ok(req) = rx.recv() {
+                        let _ = req.response.send(Err(anyhow::anyhow!(
+                            "JS Runtime creation failed: {}",
+                            e
+                        )));
+                    }
+                    return;
+                }
+            };
+            let ctx = match JsContext::full(&rt) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    error!("Failed to create JS Context: {}", e);
+                    while let Ok(req) = rx.recv() {
+                        let _ = req.response.send(Err(anyhow::anyhow!(
+                            "JS Context creation failed: {}",
+                            e
+                        )));
+                    }
+                    return;
+                }
+            };
+
+            // Pre-evaluate PAC helper functions once
+            if let Err(e) = ctx.with(|ctx| ctx.eval::<(), _>(pac_helpers())) {
+                error!("Failed to load PAC helpers: {}", e);
+                // Continue anyway — FindProxyForURL may still work
+            }
+
+            for req in rx {
+                let _ = ctx.with(|ctx| {
+                    // Evaluate (or re-evaluate) the PAC script
+                    if let Err(e) = ctx.eval::<(), _>(req.script.as_str()) {
+                        let _ = req.response.send(Err(anyhow::anyhow!(
+                            "Failed to evaluate PAC script: {}",
+                            e
+                        )));
+                        return;
+                    }
+                    let call = format!("FindProxyForURL({:?}, {:?})", req.url, req.host);
+                    match ctx.eval::<String, _>(call) {
+                        Ok(result) => {
+                            let _ = req.response.send(Ok(result));
+                        }
+                        Err(e) => {
+                            let _ = req.response.send(Err(anyhow::anyhow!(
+                                "Failed to call FindProxyForURL: {}",
+                                e
+                            )));
+                        }
+                    }
+                });
+            }
+        });
+
+        JsWorker {
+            sender: tx,
+            _handle: handle,
+        }
+    }
+
+    fn evaluate(&self, script: &str, url: &str, host: &str) -> Result<String> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(JsRequest {
+                url: url.to_string(),
+                host: host.to_string(),
+                script: script.to_string(),
+                response: tx,
+            })
+            .context("JS worker thread panicked")?;
+        rx.recv().context("JS worker thread panicked")?
+    }
+}
 
 #[derive(Clone)]
 pub struct PacEngine {
     inner: Arc<Mutex<PacInner>>,
+    js_worker: Arc<JsWorker>,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -28,6 +130,8 @@ struct PacInner {
     fetched_at: Option<Instant>,
     cache_ttl: Duration,
     state: PacState,
+    /// Whether to reload PAC when network interfaces change.
+    reload_on_network_change: bool,
     /// Track the last known network interface set to detect VPN changes.
     last_ifaddrs_hash: u64,
     /// Per-host PAC result cache to avoid re-evaluating the JS runtime
@@ -45,10 +149,12 @@ impl PacEngine {
                 script: None,
                 fetched_at: None,
                 cache_ttl: Duration::from_secs(cfg.pac.cache_ttl),
+                reload_on_network_change: cfg.pac.reload_on_network_change,
                 state: PacState::Healthy,
                 last_ifaddrs_hash: hash,
                 host_cache: HashMap::new(),
             })),
+            js_worker: Arc::new(JsWorker::new()),
         }
     }
 
@@ -66,31 +172,30 @@ impl PacEngine {
 
         let _ = self.ensure_loaded().await;
 
-        {
+        // Check state and cache; extract script for evaluation
+        let script = {
             let inner = self.inner.lock().unwrap();
+
             if inner.state == PacState::Unreachable {
                 debug!("PAC unreachable, DIRECT for: {}", host);
                 return Ok("DIRECT".to_string());
             }
-        }
 
-        // Check per-host cache before evaluating PAC
-        {
-            let inner = self.inner.lock().unwrap();
+            // Check per-host cache before evaluating PAC
             if let Some((result, ts)) = inner.host_cache.get(host) {
                 if ts.elapsed() < inner.cache_ttl {
                     debug!("PAC cache hit for: {}", host);
                     return Ok(result.clone());
                 }
             }
-        }
 
-        let script = {
-            let inner = self.inner.lock().unwrap();
             inner.script.clone().unwrap_or_default()
         };
+        // Lock is dropped here — no MutexGuard held across await
 
-        let result = evaluate_pac(&script, url, host)?;
+        // Offload heavy JS evaluation to a dedicated worker thread that
+        // keeps the JS Runtime alive across evaluations.
+        let result = self.js_worker.evaluate(&script, url, host)?;
 
         // Cache the result per host
         {
@@ -104,8 +209,11 @@ impl PacEngine {
     /// Check if network interfaces changed (e.g. VPN connected/disconnected).
     /// If so, clear the stale/unreachable state and force a PAC refresh.
     fn detect_network_change(&self) {
-        let new_hash = hash_network_interfaces();
         let mut inner = self.inner.lock().unwrap();
+        if !inner.reload_on_network_change {
+            return;
+        }
+        let new_hash = hash_network_interfaces();
         if new_hash != inner.last_ifaddrs_hash {
             info!(
                 "Network interfaces changed — resetting PAC state (was {:?})",
@@ -232,20 +340,6 @@ async fn fetch_pac(url: &str) -> Result<String> {
     Ok(body)
 }
 
-fn evaluate_pac(script: &str, url: &str, host: &str) -> Result<String> {
-    let rt = Runtime::new().context("Failed to create JS runtime")?;
-    let ctx = JsContext::full(&rt).context("Failed to create JS context")?;
-
-    ctx.with(|ctx| {
-        ctx.eval::<(), _>(pac_helpers()).ok();
-        ctx.eval::<(), _>(script.to_string())
-            .context("Failed to evaluate PAC script")?;
-        let call = format!("FindProxyForURL({:?}, {:?})", url, host);
-        let result: String = ctx.eval(call)
-            .context("Failed to call FindProxyForURL")?;
-        Ok(result)
-    })
-}
 
 pub fn parse_pac_result(result: &str) -> ProxyDirective {
     for directive in result.split(';') {

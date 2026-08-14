@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 use crate::auth::{
     basic_token, build_forward_auth_header, detect_scheme, extract_negotiate_challenge,
     extract_proxy_authenticate, negotiate_init, negotiate_round2, negotiate_step,
-    resolve_basic_credentials, spnego_cache, AuthScheme,
+    resolve_basic_credentials_from_password, spnego_cache, AuthScheme,
 };
 use crate::config::{AuthMethod, Config};
 use crate::keychain;
@@ -333,10 +333,9 @@ async fn handle_407_handshake(
         }
         AuthScheme::Basic => {
             info!("Attempting Basic authentication");
-            let (user, pass) = resolve_basic_credentials(
-                cfg.auth.username.as_deref(),
-                |u| keychain::get_password(u),
-            )?;
+            let user = cfg.auth.username.as_deref();
+            let pass = keychain::get_password_async(user.unwrap_or("")).await?;
+            let (user, pass) = resolve_basic_credentials_from_password(user, &pass)?;
             let token = basic_token(&user, &pass);
             let req = format!(
                 "CONNECT {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: {}\r\n\r\n",
@@ -368,10 +367,9 @@ async fn negotiate_fallback_to_basic(
     target: &str,
     cfg: &Config,
 ) -> Result<()> {
-    let (user, pass) = match resolve_basic_credentials(
-        cfg.auth.username.as_deref(),
-        |u| crate::keychain::get_password(u),
-    ) {
+    let user = cfg.auth.username.as_deref();
+    let pass = crate::keychain::get_password_async(user.unwrap_or("")).await?;
+    let (user, pass) = match resolve_basic_credentials_from_password(user, &pass) {
         Ok(creds) => {
             warn!("Negotiate failed, falling back to Basic auth for {}", creds.0);
             creds
@@ -438,12 +436,15 @@ async fn forward_via_proxy(
             .unwrap_or("")
             .to_string();
 
+        // Resolve basic credentials async before calling sync auth helpers
+        let user = cfg.auth.username.as_deref();
+        let pass = keychain::get_password_async(user.unwrap_or("")).await.ok();
         let auth_header = build_forward_auth_header(
             &proxy_auth,
             upstream_host,
             upstream_port,
             cfg.auth.username.as_deref(),
-            |u| keychain::get_password(u),
+            |_u| pass.clone().ok_or_else(|| anyhow::anyhow!("No keychain password")),
         )?;
 
         if let Some(auth_value) = auth_header {

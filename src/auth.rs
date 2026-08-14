@@ -205,6 +205,18 @@ pub fn resolve_basic_credentials(
     }
 }
 
+/// Resolve Basic credentials from username + password string directly.
+/// Use when the password was already resolved (e.g., via async keychain access).
+pub fn resolve_basic_credentials_from_password(
+    username: Option<&str>,
+    password: &str,
+) -> anyhow::Result<(String, String)> {
+    match username {
+        Some(user) => Ok((user.to_string(), password.to_string())),
+        None => anyhow::bail!("No username configured"),
+    }
+}
+
 /// Build a Proxy-Authorization header for forwarded (non-CONNECT) requests.
 pub fn build_forward_auth_header(
     proxy_authenticate: &str,
