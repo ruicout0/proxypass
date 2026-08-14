@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.6](https://github.com/ruicout0/proxypass/compare/v0.2.5...v0.2.6) (2026-08-14)
+
+
+### Bug Fixes
+
+* revert broken connection pool and custom copy_bidirectional ([26bef20](https://github.com/ruicout0/proxypass/commit/26bef2084cf2ee4c1934a5d2ec3fb7737256e15b))
+* revert broken connection pool and custom copy_bidirectional ([22bc3a7](https://github.com/ruicout0/proxypass/commit/22bc3a7ecdc9edd7bd0353e42f388c3de449611a))
+
 ## [0.2.5](https://github.com/ruicout0/proxypass/compare/v0.2.4...v0.2.5) (2026-08-14)
 
 
