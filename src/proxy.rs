@@ -41,6 +41,10 @@ async fn handle_connection(
     pac: PacEngine,
     cfg: std::sync::Arc<Config>,
 ) -> Result<()> {
+    // Disable Nagle's algorithm on the client-facing connection too.
+    // When the proxy writes small HTTP responses (407 auth challenges,
+    // status headers) back to the client, Nagle can delay them.
+    let _ = stream.set_nodelay(true);
     let io = TokioIo::new(stream);
     hyper::server::conn::http1::Builder::new()
         .serve_connection(
@@ -133,6 +137,22 @@ fn spnego_cache() -> &'static SpnegoCache {
     CACHE.get_or_init(|| SpnegoCache::new())
 }
 
+/// Apply socket buffer size tuning for proxy throughput.
+///
+/// macOS default TCP window is ~131KB which can limit throughput on
+/// high-BDP (bandwidth-delay product) links. Raising to 256KB helps
+/// bulk downloads through the proxy without affecting latency-sensitive
+/// interactive traffic.
+///
+/// Uses `socket2::SockRef` which works with both tokio and std TcpStreams.
+fn tune_socket_buffers(stream: &tokio::net::TcpStream) -> std::io::Result<()> {
+    use socket2::SockRef;
+    let sock = SockRef::from(stream);
+    let _ = sock.set_recv_buffer_size(256 * 1024);
+    let _ = sock.set_send_buffer_size(256 * 1024);
+    Ok(())
+}
+
 async fn tunnel(
     req: Request<Incoming>,
     upstream: &str,
@@ -149,6 +169,9 @@ async fn tunnel(
             // Without TCP_NODELAY, small writes (TLS handshake packets, SSH
             // keystrokes, etc.) get delayed up to 40ms waiting for ACKs.
             let _ = s.set_nodelay(true);
+            // Bump socket buffers for better throughput on high-BDP links.
+            // Best-effort — silently ignore errors.
+            let _ = tune_socket_buffers(&s);
             s
         }
         Err(e) => {
