@@ -2,21 +2,21 @@ class Proxypass < Formula
   desc "Lightweight PAC-aware HTTP proxy with SPNEGO/Kerberos auth and OS keychain"
   homepage "https://github.com/ruicout0/proxypass"
   license "MIT"
-  version "0.2.3"
+  version "0.2.4"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/ruicout0/proxypass/releases/download/v#{version}/proxypass-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "0b0756a0f5ffe23fd0afacedd89d7c684392f6090aff69724a292def76e8992a"
+      sha256 "e014fd07c81266fe4888ab4ee16b55b236d173a166a0b01c4ece70b6383e809c"
     else
       url "https://github.com/ruicout0/proxypass/releases/download/v#{version}/proxypass-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "738453c5e1321c7c60ebd9a3a12f366bfc16dfe5e99f9ca64845b3ce538c9fce"
+      sha256 "3ee904a9caa23d3f431797174de1a82ae2ea943e80a5d2d0a8b72b119a06dc2d"
     end
   end
 
   on_linux do
     url "https://github.com/ruicout0/proxypass/releases/download/v#{version}/proxypass-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "2f52aefd4050ba5872161941e500285a813138708a3445144e8c4c78045fd084"
+    sha256 "d6b6fb83f04750ebb50b8de99fe0b3b2c4b3ffdd4e328564d64039d8e6eb6e9f"
   end
 
   def install
