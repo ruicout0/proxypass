@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.2](https://github.com/ruicout0/proxypass/compare/v0.2.1...v0.2.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **auth:** use default credential instead of pre-acquired cred for GSSAPI ([13c9772](https://github.com/ruicout0/proxypass/commit/13c9772a26475acf0948484f4bc774e660ca92e8))
+* **proxy:** fall back to Basic auth when Kerberos Negotiate fails ([21b73b8](https://github.com/ruicout0/proxypass/commit/21b73b8099f93531a9a87904d22e39f89e0c2923))
+* **proxy:** fall back to Basic auth when Kerberos Negotiate fails ([bbed31e](https://github.com/ruicout0/proxypass/commit/bbed31ebe6b3650c67c6c62d623924ac3cf55975))
+
 ## [0.2.1](https://github.com/ruicout0/proxypass/compare/v0.2.0...v0.2.1) (2026-08-13)
 
 
