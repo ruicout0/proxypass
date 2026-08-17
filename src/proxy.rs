@@ -173,6 +173,20 @@ async fn tunnel(
 
     // Multi-step 407/Negotiate handshake — loop up to 5 times
     if response_str.contains("407") {
+        // Reconnect: the upstream may have closed after 407
+        let addr = upstream_stream.peer_addr().ok();
+        if let Some(addr) = addr {
+            match TcpStream::connect(addr).await {
+                Ok(s) => {
+                    let _ = s.set_nodelay(true);
+                    upstream_stream = s;
+                }
+                Err(e) => {
+                    warn!("Reconnect after 407 failed: {}", e);
+                    return Ok(error_response(StatusCode::BAD_GATEWAY, "Upstream connection lost"));
+                }
+            }
+        }
         if let Err(e) = handle_407_handshake(
             &mut upstream_stream,
             &mut buf,
@@ -187,6 +201,10 @@ async fn tunnel(
             return Ok(error_response(StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Auth failed"));
         }
     } else if !response_str.contains("200") {
+        warn!(
+            "Initial CONNECT unexpected response: {}",
+            response_str.lines().next().unwrap_or("")
+        );
         return Ok(error_response(StatusCode::BAD_GATEWAY, "Upstream CONNECT failed"));
     }
 
@@ -283,6 +301,10 @@ async fn handle_407_handshake(
                     return Ok(());
                 }
                 if !response_str.contains("407") {
+                    warn!(
+                        "Negotiate auth response unexpected: {}",
+                        response_str.lines().next().unwrap_or("")
+                    );
                     bail!("Unexpected response: {}", response_str.lines().next().unwrap_or(""));
                 }
 
