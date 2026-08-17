@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.8](https://github.com/ruicout0/proxypass/compare/v0.2.7...v0.2.8) (2026-08-17)
+
+
+### Bug Fixes
+
+* reconnect after 407 before Negotiate auth handshake ([b46e8f3](https://github.com/ruicout0/proxypass/commit/b46e8f3f2187da35a576cf88ccb01e7684ea92bb))
+* reconnect after 407 before Negotiate auth handshake ([9cb59c4](https://github.com/ruicout0/proxypass/commit/9cb59c4b000b1a0449fe58b41963b858f9bc0570))
+
 ## [0.2.7](https://github.com/ruicout0/proxypass/compare/v0.2.6...v0.2.7) (2026-08-14)
 
 
