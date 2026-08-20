@@ -204,3 +204,4 @@ jobs:
           fi
           git commit -m "chore(formula): update for ${TAG_NAME} [skip ci]"
           git push origin main
+
