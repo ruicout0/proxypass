@@ -30,6 +30,26 @@ brew tap ruicout0/proxypass https://github.com/ruicout0/proxypass.git
 brew install ruicout0/proxypass/proxypass
 ```
 
+> **macOS security notice:** Release binaries are not signed with an Apple Developer
+> certificate or notarized. If macOS blocks a downloaded binary, remove its
+> quarantine attribute locally, then approve it in **System Settings → Privacy &
+> Security** if prompted:
+>
+> ```bash
+> xattr -d com.apple.quarantine /path/to/proxypass
+> chmod +x /path/to/proxypass
+> /path/to/proxypass --help
+> ```
+>
+> For a local ad-hoc signature instead of removing quarantine, run:
+>
+> ```bash
+> codesign --force --deep --sign - /path/to/proxypass
+> ```
+>
+> Homebrew installations generally handle executable permissions automatically;
+> these steps are for manually downloaded or copied binaries.
+
 ### From source
 
 ```bash
