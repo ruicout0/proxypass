@@ -25,6 +25,9 @@ jobs:
   build-macos:
     name: Build macOS
     runs-on: macos-latest
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -42,10 +45,7 @@ jobs:
         run: cargo build --release --locked --features gssapi --target aarch64-apple-darwin
 
       - name: Code Sign macOS Binaries
-        if: secrets.MACOS_CERTIFICATE != ''
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        if: env.MACOS_CERTIFICATE != ''
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
           KEYCHAIN_PASSWORD=$(openssl rand -hex 12)
