@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/ruicout0/proxypass/compare/v0.3.0...v0.3.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ci:** remove invalid macOS signing ([0c6ed3b](https://github.com/ruicout0/proxypass/commit/0c6ed3bf075b0073c94fbcf1935506d85e4d1319))
+
 ## [0.3.0](https://github.com/ruicout0/proxypass/compare/v0.2.8...v0.3.0) (2026-08-20)
 
 
