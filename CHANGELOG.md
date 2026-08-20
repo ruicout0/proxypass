@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/ruicout0/proxypass/compare/v0.2.8...v0.3.0) (2026-08-20)
+
+
+### Features
+
+* **sign:** fix signing ([929ddbf](https://github.com/ruicout0/proxypass/commit/929ddbfc7f3937b2ffe8430327fe0a1f7c2245ce))
+* **sign:** fix signing ([87422c4](https://github.com/ruicout0/proxypass/commit/87422c4010b231683d12b4a61157cb5e2166f6bc))
+
+
+### Bug Fixes
+
+* **ci:** move codesign secrets to job-level env ([b287a86](https://github.com/ruicout0/proxypass/commit/b287a861559c50254defae7ab4d4418a2fc63973))
+* **ci:** trigger release workflow ([8e14106](https://github.com/ruicout0/proxypass/commit/8e14106361f5664a72fbc6a52f48b0c48c185977))
+
 ## [0.2.8](https://github.com/ruicout0/proxypass/compare/v0.2.7...v0.2.8) (2026-08-17)
 
 
