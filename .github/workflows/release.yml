@@ -7,6 +7,13 @@ on:
         description: Git tag to build and publish
         required: true
         type: string
+    secrets:
+      MACOS_CERTIFICATE:
+        description: Base64-encoded macOS signing certificate (.p12)
+        required: false
+      MACOS_CERTIFICATE_PWD:
+        description: Password for the macOS signing certificate
+        required: false
 permissions:
   contents: write
 
@@ -33,6 +40,31 @@ jobs:
 
       - name: Build arm64
         run: cargo build --release --locked --features gssapi --target aarch64-apple-darwin
+
+      - name: Code Sign macOS Binaries
+        if: secrets.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 12)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Sign macOS binaries with custom domain identity and bundle identifier
+          codesign --keychain "$KEYCHAIN_PATH" -s "com.ruicouto.codesign" -i com.ruicouto.proxypass -f target/x86_64-apple-darwin/release/proxypass
+          codesign --keychain "$KEYCHAIN_PATH" -s "com.ruicouto.codesign" -i com.ruicouto.proxypass -f target/aarch64-apple-darwin/release/proxypass
+
+          security delete-keychain "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
 
       - name: Package macOS binaries
         env:
