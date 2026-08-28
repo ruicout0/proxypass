@@ -105,8 +105,8 @@ no_proxy = ["localhost", "127.0.0.1", "*.local", "10.*"]
 # Username for upstream proxy authentication.
 # Negotiate uses this to look up Kerberos tickets.
 # Basic uses this + keychain password.
-# Format: "DOMAIN\\user" or just "user"
-username = "DOMAIN\\user"
+# Format: "DOMAIN\\user" or 'DOMAIN\user' (literal string) or just "user"
+username = 'DOMAIN\user'
 
 # Auth method: "auto", "negotiate", "basic", "none"
 #   auto      — try Negotiate first, fall back to Basic
@@ -246,13 +246,52 @@ once the script is cached).
 
 ## Shell environment
 
-Add to `~/.zshrc` / `~/.bashrc`:
+### macOS / Linux (`~/.zshrc` or `~/.bashrc`)
 
 ```bash
 export http_proxy=http://127.0.0.1:3128
 export https_proxy=http://127.0.0.1:3128
+export all_proxy=http://127.0.0.1:3128
 export no_proxy=localhost,127.0.0.1,*.local
 ```
+
+### Windows PowerShell
+
+**Current session:**
+```powershell
+$env:HTTP_PROXY  = "http://127.0.0.1:3128"
+$env:HTTPS_PROXY = "http://127.0.0.1:3128"
+$env:ALL_PROXY   = "http://127.0.0.1:3128"
+$env:NO_PROXY    = "localhost,127.0.0.1,::1,*.local"
+```
+
+**Persistent (User environment variables):**
+```powershell
+[Environment]::SetEnvironmentVariable("HTTP_PROXY",  "http://127.0.0.1:3128", "User")
+[Environment]::SetEnvironmentVariable("HTTPS_PROXY", "http://127.0.0.1:3128", "User")
+[Environment]::SetEnvironmentVariable("ALL_PROXY",   "http://127.0.0.1:3128", "User")
+[Environment]::SetEnvironmentVariable("NO_PROXY",    "localhost,127.0.0.1,::1,*.local", "User")
+```
+
+### Windows Command Prompt (`cmd.exe`)
+
+```cmd
+set HTTP_PROXY=http://127.0.0.1:3128
+set HTTPS_PROXY=http://127.0.0.1:3128
+set ALL_PROXY=http://127.0.0.1:3128
+set NO_PROXY=localhost,127.0.0.1,::1,*.local
+```
+
+### WSL2 integration
+
+When running `proxypass` on the Windows host and connecting from WSL2:
+
+- **Mirrored networking (recommended):** Set `networkingMode=mirrored` in `%USERPROFILE%\.wslconfig` under `[wsl2]`. WSL2 can then reach the Windows proxy directly via `http://127.0.0.1:3128`.
+- **Default NAT mode:** Configure `listen = "0.0.0.0"` in `proxypass.toml` and configure WSL2 clients with the host gateway IP:
+  ```bash
+  export HTTP_PROXY="http://$(ip route show | awk '/default/ {print $3}'):3128"
+  export HTTPS_PROXY="$HTTP_PROXY"
+  ```
 
 ### `no_proxy` patterns
 
@@ -341,7 +380,7 @@ Trigger:  At log on
 |---|---|
 | **macOS** | Xcode CLT (for `libc` headers) |
 | **Linux** | `libkrb5-dev` (MIT Kerberos headers for `libgssapi`) |
-| **Windows** | No extra deps (SSPI is built into Windows) |
+| **Windows** | MSVC C++ Build Tools, `patch` command (included with Git for Windows, or via Scoop/Chocolatey for QuickJS build) |
 
 ## Building
 

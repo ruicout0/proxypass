@@ -328,6 +328,7 @@ fn pac_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .no_proxy()
             .tls_built_in_root_certs(true)
             .timeout(Duration::from_secs(5))
             .build()
