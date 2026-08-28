@@ -117,7 +117,108 @@ pub fn save(cfg: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = toml::to_string_pretty(cfg)?;
+    let toml_str = toml::to_string_pretty(cfg)?;
+    let content = format_toml_literal_strings(&toml_str);
     std::fs::write(&path, content)?;
     Ok(())
+}
+
+/// Formats TOML string values with single quotes (literal strings) where safe.
+/// Literal strings in TOML (`'...'`) do not interpret backslashes as escape sequences,
+/// preventing syntax errors when Windows domain usernames (e.g. `DOMAIN\user`) are used.
+pub fn format_toml_literal_strings(toml_str: &str) -> String {
+    let mut out = String::with_capacity(toml_str.len());
+    for line in toml_str.lines() {
+        let trimmed = line.trim_start();
+        // Skip comments and table headers
+        if trimmed.starts_with('#') || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        let mut result = String::new();
+        let chars: Vec<char> = line.chars().collect();
+        let mut idx = 0;
+
+        while idx < chars.len() {
+            if chars[idx] == '"' {
+                // Look ahead for closing double quote
+                let mut end = idx + 1;
+                let mut escaped = false;
+                let mut raw_val = String::new();
+                let mut valid_literal = true;
+
+                while end < chars.len() {
+                    let ch = chars[end];
+                    if escaped {
+                        match ch {
+                            '"' => raw_val.push('"'),
+                            '\\' => raw_val.push('\\'),
+                            'n' => raw_val.push('\n'),
+                            'r' => raw_val.push('\r'),
+                            't' => raw_val.push('\t'),
+                            other => {
+                                raw_val.push('\\');
+                                raw_val.push(other);
+                            }
+                        }
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        break;
+                    } else {
+                        if ch == '\'' || ch == '\n' || ch == '\r' {
+                            valid_literal = false;
+                        }
+                        raw_val.push(ch);
+                    }
+                    end += 1;
+                }
+
+                if end < chars.len() && chars[end] == '"' && valid_literal && !raw_val.contains('\n') {
+                    result.push('\'');
+                    result.push_str(&raw_val);
+                    result.push('\'');
+                    idx = end + 1;
+                    continue;
+                }
+            }
+            result.push(chars[idx]);
+            idx += 1;
+        }
+
+        out.push_str(&result);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_toml_literal_strings() {
+        let mut cfg = Config::default();
+        cfg.auth.username = Some(r"MUC\q632688".to_string());
+        cfg.proxy.pac = Some("http://muc.proxy-pac.bmwgroup.net/proxy.pac".to_string());
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        let formatted = format_toml_literal_strings(&toml_str);
+
+        assert!(formatted.contains("username = 'MUC\\q632688'"));
+        assert!(formatted.contains("pac = 'http://muc.proxy-pac.bmwgroup.net/proxy.pac'"));
+        assert!(formatted.contains("listen = '127.0.0.1'"));
+        assert!(formatted.contains("'localhost'"));
+
+        // Roundtrip verification: parse the generated TOML back into Config
+        let parsed: Config = toml::from_str(&formatted).expect("Failed to parse single-quoted TOML");
+        assert_eq!(parsed.auth.username, Some(r"MUC\q632688".to_string()));
+        assert_eq!(parsed.proxy.pac, Some("http://muc.proxy-pac.bmwgroup.net/proxy.pac".to_string()));
+        assert_eq!(parsed.proxy.port, 3128);
+        assert_eq!(parsed.proxy.listen, "127.0.0.1");
+        assert_eq!(parsed.proxy.no_proxy, vec!["localhost", "127.0.0.1", "*.local"]);
+        assert_eq!(parsed.auth.method, AuthMethod::Negotiate);
+    }
 }
