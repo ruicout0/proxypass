@@ -370,33 +370,49 @@ are limited to service management and credential storage.
 | **Linux** | systemd (user) | `proxypass install` | `proxypass uninstall` | `proxypass status` |
 | **Windows** | Manual | Run `proxypass` in foreground | N/A | N/A |
 
-On **Windows**, automatic service installation via `proxypass install` is not yet supported (as background services running under `SYSTEM` or non-interactive service accounts cannot access the user's logon session Kerberos/SSPI tickets).
+On **Windows**, automatic service installation via `proxypass install` is not yet supported (as background services running under `SYSTEM` or non-interactive service accounts cannot access the user's interactive logon session Kerberos/SSPI tickets).
 
-Use **Windows Task Scheduler** to auto-start it silently in the background on logon:
+Use **Windows Task Scheduler** with a lightweight VBScript launcher (`wscript.exe`) so it auto-starts completely hidden in the background on logon:
 
-**Option 1: PowerShell (recommended)**
+#### 1. Create the silent background launcher (`run-proxypass.vbs`)
+
+Run once in PowerShell to create the background runner in your config folder:
+
 ```powershell
-$action   = New-ScheduledTaskAction -Execute "$env:USERPROFILE\.cargo\bin\proxypass.exe"
+$vbsPath = "$env:APPDATA\proxypass\run-proxypass.vbs"
+$targetExe = "$env:USERPROFILE\.cargo\bin\proxypass.exe"
+
+@"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$targetExe""", 0, False
+"@ | Set-Content -Path $vbsPath -Encoding Ascii
+```
+*(The `0` window-style parameter instructs Windows to execute the console application in `SW_HIDE` mode, preventing CMD popups).*
+
+#### 2. Register the Scheduled Task (PowerShell)
+
+```powershell
+$action   = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$env:APPDATA\proxypass\run-proxypass.vbs`""
 $trigger  = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "proxypass" -Action $action -Trigger $trigger -Settings $settings -Description "proxypass corporate proxy daemon"
+
+Register-ScheduledTask -TaskName "proxypass" -Action $action -Trigger $trigger -Settings $settings -Description "proxypass corporate proxy daemon (silent background)"
 ```
 
-**Option 2: Command Prompt (`schtasks`)**
-```cmd
-schtasks /create /tn "proxypass" /tr "%USERPROFILE%\.cargo\bin\proxypass.exe" /sc onlogon /rl limited
-```
+#### 3. Task Management Commands
 
-**Manage Task:**
 ```powershell
-# Start immediately
-Start-ScheduledTask -TaskName "proxypass"   # or: schtasks /run /tn "proxypass"
+# Start immediately (without logging off)
+Start-ScheduledTask -TaskName "proxypass"
 
-# Stop task
-Stop-ScheduledTask -TaskName "proxypass"    # or: schtasks /end /tn "proxypass"
+# Verify it is running and listening on port 3128
+Get-NetTCPConnection -LocalPort 3128 -State Listen
 
-# Remove / Uninstall
-Unregister-ScheduledTask -TaskName "proxypass" -Confirm:$false  # or: schtasks /delete /tn "proxypass" /f
+# Stop daemon
+Stop-ScheduledTask -TaskName "proxypass"
+
+# Uninstall / Remove Scheduled Task
+Unregister-ScheduledTask -TaskName "proxypass" -Confirm:$false
 ```
 
 ### Credential storage
