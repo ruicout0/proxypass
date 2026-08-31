@@ -105,8 +105,8 @@ no_proxy = ["localhost", "127.0.0.1", "*.local", "10.*"]
 # Username for upstream proxy authentication.
 # Negotiate uses this to look up Kerberos tickets.
 # Basic uses this + keychain password.
-# Format: "DOMAIN\\user" or just "user"
-username = "DOMAIN\\user"
+# Format: "DOMAIN\\user" or 'DOMAIN\user' (literal string) or just "user"
+username = 'DOMAIN\user'
 
 # Auth method: "auto", "negotiate", "basic", "none"
 #   auto      — try Negotiate first, fall back to Basic
@@ -246,13 +246,79 @@ once the script is cached).
 
 ## Shell environment
 
-Add to `~/.zshrc` / `~/.bashrc`:
+### macOS / Linux (`~/.zshrc` or `~/.bashrc`)
 
 ```bash
 export http_proxy=http://127.0.0.1:3128
 export https_proxy=http://127.0.0.1:3128
+export all_proxy=http://127.0.0.1:3128
 export no_proxy=localhost,127.0.0.1,*.local
 ```
+
+### Windows PowerShell
+
+**Current session & PowerShell Profile (`$PROFILE`):**
+Add to your PowerShell profile (`notepad $PROFILE`) so interactive sessions always have both uppercase and lowercase variables set:
+
+```powershell
+$env:HTTP_PROXY  = "http://127.0.0.1:3128"
+$env:HTTPS_PROXY = "http://127.0.0.1:3128"
+$env:ALL_PROXY   = "http://127.0.0.1:3128"
+$env:NO_PROXY    = "localhost,127.0.0.1,::1,*.local"
+
+# Lowercase variants (used by Python, Go, git, and Unix-origin CLI tools)
+$env:http_proxy  = $env:HTTP_PROXY
+$env:https_proxy = $env:HTTPS_PROXY
+$env:all_proxy   = $env:ALL_PROXY
+$env:no_proxy    = $env:NO_PROXY
+```
+
+**Persistent across all new Windows shells (User Registry):**
+```powershell
+$proxyUrl = "http://127.0.0.1:3128"
+$noProxy  = "localhost,127.0.0.1,::1,*.local"
+
+foreach ($var in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
+    [Environment]::SetEnvironmentVariable($var, $proxyUrl, "User")
+}
+foreach ($var in @("NO_PROXY", "no_proxy")) {
+    [Environment]::SetEnvironmentVariable($var, $noProxy, "User")
+}
+```
+
+### Windows Command Prompt (`cmd.exe`)
+
+**Current session:**
+```cmd
+set HTTP_PROXY=http://127.0.0.1:3128
+set HTTPS_PROXY=http://127.0.0.1:3128
+set ALL_PROXY=http://127.0.0.1:3128
+set NO_PROXY=localhost,127.0.0.1,::1,*.local
+set http_proxy=http://127.0.0.1:3128
+set https_proxy=http://127.0.0.1:3128
+set all_proxy=http://127.0.0.1:3128
+set no_proxy=localhost,127.0.0.1,::1,*.local
+```
+
+**Persistent (using `setx` or `reg`):**
+```cmd
+setx HTTP_PROXY "http://127.0.0.1:3128"
+setx HTTPS_PROXY "http://127.0.0.1:3128"
+setx ALL_PROXY "http://127.0.0.1:3128"
+setx NO_PROXY "localhost,127.0.0.1,::1,*.local"
+```
+*(Or write directly to registry if `NO_PROXY` exceeds `setx` character limits: `reg add "HKCU\Environment" /v NO_PROXY /t REG_SZ /d "localhost,127.0.0.1,::1,..." /f`)*
+
+### WSL2 integration
+
+When running `proxypass` on the Windows host and connecting from WSL2:
+
+- **Mirrored networking (recommended):** Set `networkingMode=mirrored` in `%USERPROFILE%\.wslconfig` under `[wsl2]`. WSL2 can then reach the Windows proxy directly via `http://127.0.0.1:3128`.
+- **Default NAT mode:** Configure `listen = "0.0.0.0"` in `proxypass.toml` and configure WSL2 clients with the host gateway IP:
+  ```bash
+  export HTTP_PROXY="http://$(ip route show | awk '/default/ {print $3}'):3128"
+  export HTTPS_PROXY="$HTTP_PROXY"
+  ```
 
 ### `no_proxy` patterns
 
@@ -304,15 +370,49 @@ are limited to service management and credential storage.
 | **Linux** | systemd (user) | `proxypass install` | `proxypass uninstall` | `proxypass status` |
 | **Windows** | Manual | Run `proxypass` in foreground | N/A | N/A |
 
-On **Windows**, automatic service installation is not yet supported. Run
-`proxypass` in a terminal or configure Windows Task Scheduler to start it
-at login:
+On **Windows**, automatic service installation via `proxypass install` is not yet supported (as background services running under `SYSTEM` or non-interactive service accounts cannot access the user's interactive logon session Kerberos/SSPI tickets).
 
+Use **Windows Task Scheduler** with a lightweight VBScript launcher (`wscript.exe`) so it auto-starts completely hidden in the background on logon:
+
+#### 1. Create the silent background launcher (`run-proxypass.vbs`)
+
+Run once in PowerShell to create the background runner in your config folder:
+
+```powershell
+$vbsPath = "$env:APPDATA\proxypass\run-proxypass.vbs"
+$targetExe = "$env:USERPROFILE\.cargo\bin\proxypass.exe"
+
+@"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$targetExe""", 0, False
+"@ | Set-Content -Path $vbsPath -Encoding Ascii
 ```
-# Task Scheduler action:
-Program:  C:\Users\You\.cargo\bin\proxypass.exe
-Arguments: (none)
-Trigger:  At log on
+*(The `0` window-style parameter instructs Windows to execute the console application in `SW_HIDE` mode, preventing CMD popups).*
+
+#### 2. Register the Scheduled Task (PowerShell)
+
+```powershell
+$action   = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$env:APPDATA\proxypass\run-proxypass.vbs`""
+$trigger  = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+
+Register-ScheduledTask -TaskName "proxypass" -Action $action -Trigger $trigger -Settings $settings -Description "proxypass corporate proxy daemon (silent background)"
+```
+
+#### 3. Task Management Commands
+
+```powershell
+# Start immediately (without logging off)
+Start-ScheduledTask -TaskName "proxypass"
+
+# Verify it is running and listening on port 3128
+Get-NetTCPConnection -LocalPort 3128 -State Listen
+
+# Stop daemon
+Stop-ScheduledTask -TaskName "proxypass"
+
+# Uninstall / Remove Scheduled Task
+Unregister-ScheduledTask -TaskName "proxypass" -Confirm:$false
 ```
 
 ### Credential storage
@@ -341,7 +441,7 @@ Trigger:  At log on
 |---|---|
 | **macOS** | Xcode CLT (for `libc` headers) |
 | **Linux** | `libkrb5-dev` (MIT Kerberos headers for `libgssapi`) |
-| **Windows** | No extra deps (SSPI is built into Windows) |
+| **Windows** | MSVC C++ Build Tools, `patch` command (included with Git for Windows, or via Scoop/Chocolatey for QuickJS build) |
 
 ## Building
 

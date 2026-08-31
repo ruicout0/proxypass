@@ -125,7 +125,7 @@ pub fn setup() -> Result<()> {
             cfg.auth.method = config::AuthMethod::Basic;
             let password = rpassword::prompt_password("Password: ")?;
             keychain::set_password(&username, &password)?;
-            println!("✓ Password stored in macOS Keychain");
+            println!("✓ Password stored in {}", keychain_store_name());
         }
         "3" => {
             cfg.auth.method = config::AuthMethod::None;
@@ -144,7 +144,7 @@ pub fn setup() -> Result<()> {
                 if save_pwd.trim().eq_ignore_ascii_case("y") {
                     let password = rpassword::prompt_password("Password: ")?;
                     keychain::set_password(user.trim(), &password)?;
-                    println!("✓ Password stored in macOS Keychain");
+                    println!("✓ Password stored in {}", keychain_store_name());
                 }
             }
         }
@@ -239,7 +239,7 @@ pub fn set_password() -> Result<()> {
     println!("Setting password for '{}'", username);
     let password = rpassword::prompt_password("Password: ")?;
     keychain::set_password(&username, &password)?;
-    println!("✓ Password stored in macOS Keychain");
+    println!("✓ Password stored in {}", keychain_store_name());
     Ok(())
 }
 
@@ -296,4 +296,14 @@ fn setup_logging(cfg: &config::Config) {
         }
     }
     subscriber.init();
+}
+
+fn keychain_store_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS Keychain"
+    } else if cfg!(target_os = "windows") {
+        "Windows Credential Manager"
+    } else {
+        "OS keychain (Secret Service)"
+    }
 }
