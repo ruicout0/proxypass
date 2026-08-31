@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/ruicout0/proxypass/compare/v0.3.1...v0.4.0) (2026-08-31)
+
+
+### Features
+
+* **config:** emit single-quoted TOML strings and use platform-specific keychain messages ([3cd832e](https://github.com/ruicout0/proxypass/commit/3cd832edea4a946ea3f251e0fef5eaa2354943db))
+
+
+### Bug Fixes
+
+* **pac:** bypass env proxies when fetching PAC script and add Windows guide ([d4599a8](https://github.com/ruicout0/proxypass/commit/d4599a845f030dd4a8f82ba2242e28a4f363ede1))
+* **pac:** prevent recursive PAC self-proxy loop and add Windows setup guide ([4c0de93](https://github.com/ruicout0/proxypass/commit/4c0de9399f7a0ad06b9c45c2eb00b99a4dfb3b11))
+
 ## [0.3.1](https://github.com/ruicout0/proxypass/compare/v0.3.0...v0.3.1) (2026-08-20)
 
 
