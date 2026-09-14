@@ -30,7 +30,7 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 
 # Keychain
-keyring = "3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
