@@ -194,6 +194,17 @@ proxypass password
 
 The password is **never** stored in the TOML config file — only the username.
 
+> **Security notice on Basic authentication:**
+> In HTTP Basic auth, credentials (`username:password`) are Base64-encoded in the `Proxy-Authorization` header and sent across the wire. Unless the upstream proxy endpoint itself is protected by TLS (`https://`), these credentials travel unencrypted in transit.
+>
+> In contrast, **Kerberos/Negotiate** (`method = "negotiate"`) uses ticket-based challenge-response authentication where raw passwords are never transmitted on the wire, and tickets are scoped to the specific proxy service principal.
+>
+> If your environment requires avoiding plaintext credential transmission over the wire, enforce Negotiate-only auth in `proxypass.toml`:
+> ```toml
+> [auth]
+> method = "negotiate"
+> ```
+
 ### Troubleshooting auth
 
 ```bash
