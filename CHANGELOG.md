@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/ruicout0/proxypass/compare/v0.4.0...v0.4.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* enable native OS keychain features for keyring dependency ([19cba42](https://github.com/ruicout0/proxypass/commit/19cba42033da6ee829648b2a236d76085dca8b00))
+* enable native OS keychain features for keyring dependency ([8e78010](https://github.com/ruicout0/proxypass/commit/8e78010c07cee45714233b24e449e866b9060432))
+
 ## [0.4.0](https://github.com/ruicout0/proxypass/compare/v0.3.1...v0.4.0) (2026-08-31)
 
 
