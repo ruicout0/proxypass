@@ -8,19 +8,6 @@ A lightweight PAC-aware HTTP forwarding proxy with OS-native keychain auth and n
 - **Cross-platform**: macOS, Linux, Windows
 - **Footprint**: ~3 MB static binary, ~7 MB RAM at idle, ~10 MB under load
 
-## Quick start
-
-```bash
-# 1. Run setup wizard
-proxypass setup
-
-# 2. Start the proxy
-proxypass
-
-# 3. Test
-proxypass test
-```
-
 ## Installation
 
 ### Homebrew (macOS)
@@ -59,6 +46,22 @@ cargo build --release
 # Binary at target/release/proxypass
 ```
 
+## Quick start
+
+```bash
+# 1. Run setup wizard
+proxypass setup
+
+# 2. (Optional) Install as background service / daemon
+proxypass install
+
+# 3. Start the proxy (if running in foreground)
+proxypass
+
+# 4. Test
+proxypass test
+```
+
 ## Commands
 
 | Command | Description |
@@ -90,38 +93,38 @@ Config location:
 ```toml
 [proxy]
 # PAC URL (auto-discovers upstream proxy per request)
-pac = "http://wpad.company.com/proxy.pac"
+pac = 'http://wpad.company.com/proxy.pac'
 
 # OR: static upstream proxy (mutually exclusive with pac)
-# proxy = "proxy.company.com:8080"
+# proxy = 'proxy.company.com:8080'
 
 port = 3128
-listen = "127.0.0.1"
+listen = '127.0.0.1'
 
 # Hosts that bypass the proxy (glob patterns supported)
-no_proxy = ["localhost", "127.0.0.1", "*.local", "10.*"]
+no_proxy = ['localhost', '127.0.0.1', '*.local', '10.*']
 
 [auth]
 # Username for upstream proxy authentication.
 # Negotiate uses this to look up Kerberos tickets.
 # Basic uses this + keychain password.
-# Format: "DOMAIN\\user" or 'DOMAIN\user' (literal string) or just "user"
+# Format: 'DOMAIN\user' (literal string) or just 'user'
 username = 'DOMAIN\user'
 
-# Auth method: "auto", "negotiate", "basic", "none"
+# Auth method: 'auto', 'negotiate', 'basic', 'none'
 #   auto      — try Negotiate first, fall back to Basic
 #   negotiate — Negotiate/Kerberos only (Kerberos ticket required)
 #   basic     — username + keychain password
 #   none      — no auth
-method = "auto"
+method = 'auto'
 
 [pac]
 cache_ttl = 300                # seconds before re-fetching PAC
 reload_on_network_change = true
 
 [log]
-level = "info"                 # trace, debug, info, warn, error
-file = "/tmp/proxypass.log"    # omit for stderr
+level = 'info'                 # trace, debug, info, warn, error
+file = '/tmp/proxypass.log'    # omit for stderr
 ```
 
 > **PAC vs static proxy**: When both `pac` and `proxy` are set, **PAC takes
@@ -193,6 +196,19 @@ proxypass password
 ```
 
 The password is **never** stored in the TOML config file — only the username.
+
+> **Security notice on Basic authentication:**
+> In HTTP Basic auth, credentials (`username:password`) are Base64-encoded in the `Proxy-Authorization` header and sent across the wire. Unless the upstream proxy endpoint itself is protected by TLS (`https://`), these credentials travel unencrypted in transit.
+>
+> It is the responsibility of the upstream proxy to reject Basic authentication if plaintext credential transmission violates organizational policy.
+>
+> In contrast, **Kerberos/Negotiate** (`method = 'negotiate'`) uses ticket-based challenge-response authentication where raw passwords are never transmitted on the wire, and tickets are scoped to the specific proxy service principal.
+>
+> If your environment requires avoiding plaintext credential transmission over the wire, enforce Negotiate-only auth in `proxypass.toml`:
+> ```toml
+> [auth]
+> method = 'negotiate'
+> ```
 
 ### Troubleshooting auth
 
